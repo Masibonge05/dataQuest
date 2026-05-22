@@ -1,0 +1,361 @@
+/* =========================================================
+   FNB CORPORATE THEME
+========================================================= */
+
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+
+:root {
+
+  --fnb-primary: #008CBB;
+  --fnb-primary-light: #009FCF;
+  --fnb-accent-orange: #fcb004;
+
+  --background-default: #F4F7FA;
+  --card-bg: #FFFFFF;
+
+  --text-primary: #0F172A;
+  --text-secondary: #64748B;
+
+  --border-color: #DCE6F0;
+
+  --success: #10B981;
+  --danger: #EF4444;
+}
+
+/* =========================================================
+   GLOBAL
+========================================================= */
+
+html,
+body,
+[data-testid="stAppViewContainer"] {
+
+  background-color: var(--background-default) !important;
+  color: var(--text-primary) !important;
+  font-family: 'Outfit', sans-serif;
+}
+
+.main .block-container {
+
+  padding-top: 1.5rem;
+  padding-bottom: 2rem;
+}
+
+/* =========================================================
+   STREAMLIT HEADER
+========================================================= */
+
+[data-testid="stHeader"] {
+
+  background: #FFFFFF !important;
+  border-bottom: 1px solid var(--border-color);
+}
+
+/* =========================================================
+   SIDEBAR
+========================================================= */
+
+[data-testid="stSidebar"] {
+
+  background: linear-gradient(180deg,
+      #008CBB 0%,
+      #00739A 100%) !important;
+}
+
+[data-testid="stSidebar"] * {
+
+  color: #FFFFFF;
+}
+
+/* =========================================================
+   HEADER
+========================================================= */
+
+.enterprise-header {
+
+  background: linear-gradient(135deg,
+      #0077A3 0%,
+      #008CBB 55%,
+      #009FCF 100%);
+
+  border-radius: 18px;
+
+  padding: 1.5rem 2rem;
+
+  margin-bottom: 2rem;
+
+  border-left: 6px solid var(--fnb-accent-orange);
+
+  box-shadow:
+    0 6px 18px rgba(0, 0, 0, 0.12);
+
+  color: white !important;
+}
+
+.header-title {
+
+  font-size: 2rem;
+
+  font-weight: 700;
+
+  color: #FFFFFF !important;
+
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+.header-subtitle {
+
+  color: #F1F5F9 !important;
+
+  margin-top: 0.45rem;
+
+  font-size: 0.95rem;
+
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+.prod-badge {
+
+  background: var(--fnb-accent-orange);
+
+  color: #000000;
+
+  padding: 0.2rem 0.6rem;
+
+  border-radius: 6px;
+
+  font-size: 0.72rem;
+
+  margin-left: 0.5rem;
+
+  font-weight: 700;
+}
+
+.status-pill {
+
+  background: rgba(255, 255, 255, 0.22);
+
+  border: 1px solid rgba(255, 255, 255, 0.28);
+
+  backdrop-filter: blur(6px);
+
+  padding: 0.55rem 1rem;
+
+  border-radius: 999px;
+
+  color: #FFFFFF !important;
+
+  text-align: center;
+
+  font-weight: 600;
+}
+
+.meta-info {
+
+  margin-top: 0.75rem;
+
+  font-size: 0.82rem;
+
+  color: #E2E8F0 !important;
+
+  text-align: right;
+
+  line-height: 1.5;
+}
+
+/* =========================================================
+   CARDS
+========================================================= */
+
+.content-card {
+
+  background: #FFFFFF;
+
+  border-radius: 16px;
+
+  padding: 1.5rem;
+
+  margin-bottom: 1.5rem;
+
+  border: 1px solid #D6E0EA;
+
+  box-shadow:
+    0 2px 6px rgba(15, 23, 42, 0.05),
+    0 10px 24px rgba(15, 23, 42, 0.06);
+}
+
+.metric-card {
+
+  background: #FFFFFF;
+
+  border-radius: 16px;
+
+  padding: 1.3rem;
+
+  border: 1px solid #DCE6F0;
+
+  border-top: 5px solid var(--fnb-primary);
+
+  box-shadow:
+    0 2px 6px rgba(15, 23, 42, 0.04),
+    0 8px 18px rgba(15, 23, 42, 0.05);
+
+  transition: all 0.2s ease;
+}
+
+.metric-card:hover {
+
+  transform: translateY(-2px);
+
+  box-shadow:
+    0 6px 18px rgba(15, 23, 42, 0.08);
+}
+
+.metric-label {
+
+  color: var(--text-secondary);
+
+  font-size: 0.8rem;
+
+  font-weight: 600;
+
+  text-transform: uppercase;
+
+  margin-bottom: 0.5rem;
+}
+
+.metric-value {
+
+  color: var(--fnb-primary);
+
+  font-size: 2rem;
+
+  font-weight: 700;
+}
+
+.metric-delta {
+
+  margin-top: 0.5rem;
+
+  font-size: 0.85rem;
+
+  font-weight: 600;
+}
+
+.delta-up {
+
+  color: var(--success);
+}
+
+.delta-down {
+
+  color: var(--danger);
+}
+
+.delta-neutral {
+
+  color: var(--text-secondary);
+}
+
+/* =========================================================
+   BUTTONS
+========================================================= */
+
+div.stButton>button {
+
+  background: var(--fnb-primary) !important;
+
+  color: white !important;
+
+  border: none !important;
+
+  border-radius: 10px !important;
+
+  font-weight: 600 !important;
+
+  padding: 0.6rem 1.2rem !important;
+}
+
+div.stButton>button:hover {
+
+  background: var(--fnb-primary-light) !important;
+}
+
+/* =========================================================
+   TEXT
+========================================================= */
+
+h1,
+h2,
+h3,
+h4,
+h5 {
+
+  color: #0F172A !important;
+}
+
+/* =========================================================
+   DATAFRAMES
+========================================================= */
+
+[data-testid="stDataFrame"] {
+
+  border-radius: 12px;
+
+  overflow: hidden;
+}
+
+/* =========================================================
+   REMOVE STREAMLIT BRANDING
+========================================================= */
+
+#MainMenu {
+  visibility: hidden;
+}
+
+footer {
+  visibility: hidden;
+}
+
+.environment-label {
+
+  font-size: 0.72rem;
+
+  font-weight: 700;
+
+  letter-spacing: 0.08em;
+
+  color: rgba(255, 255, 255, 0.75);
+
+  text-transform: uppercase;
+
+  margin-bottom: 0.2rem;
+
+  text-align: right;
+}
+
+.environment-version {
+
+  display: inline-block;
+
+  background: rgba(255, 255, 255, 0.18);
+
+  border: 1px solid rgba(255, 255, 255, 0.28);
+
+  backdrop-filter: blur(6px);
+
+  color: #FFFFFF;
+
+  padding: 0.45rem 0.9rem;
+
+  border-radius: 10px;
+
+  font-size: 0.82rem;
+
+  font-weight: 700;
+
+  box-shadow:
+    0 2px 6px rgba(0, 0, 0, 0.12);
+
+  text-align: center;
+}

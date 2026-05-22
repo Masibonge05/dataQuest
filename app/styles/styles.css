@@ -1,0 +1,166 @@
+/* =========================================================
+   RISKLENS ANALYTICS
+   STREAMLIT OVERRIDES ONLY
+========================================================= */
+
+/* =========================================================
+   FONT IMPORT
+========================================================= */
+
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+
+/* =========================================================
+   GLOBAL TYPOGRAPHY
+========================================================= */
+
+html,
+body,
+[data-testid="stAppViewContainer"] {
+
+    font-family:
+        'Outfit',
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        Roboto,
+        sans-serif;
+}
+
+/* =========================================================
+   STREAMLIT HEADER
+========================================================= */
+
+[data-testid="stHeader"] {
+
+    background-color: white;
+
+    border-bottom: 1px solid var(--border-color);
+
+    height: 3.5rem;
+}
+
+/* =========================================================
+   HIDE STREAMLIT BRANDING
+========================================================= */
+
+#MainMenu {
+    visibility: hidden;
+}
+
+footer {
+    visibility: hidden;
+}
+
+/* =========================================================
+   STREAMLIT METRIC CARDS
+========================================================= */
+
+[data-testid="metric-container"] {
+
+    background: white;
+
+    border-radius: 16px;
+
+    padding: 1rem;
+
+    border: 1px solid var(--border-color);
+
+    box-shadow: var(--shadow-sm);
+}
+
+/* =========================================================
+   DATAFRAMES
+========================================================= */
+
+[data-testid="stDataFrame"] {
+
+    border-radius: 16px;
+
+    overflow: hidden;
+
+    border: 1px solid var(--border-color);
+}
+
+/* =========================================================
+   PLOTLY CHARTS
+========================================================= */
+
+.js-plotly-plot {
+
+    border-radius: 16px;
+
+    overflow: hidden;
+}
+
+/* =========================================================
+   INPUTS
+========================================================= */
+
+.stSelectbox div[data-baseweb="select"],
+.stTextInput input,
+.stNumberInput input {
+
+    border-radius: 10px !important;
+
+    border: 1px solid var(--border-color) !important;
+}
+
+/* =========================================================
+   BUTTONS
+========================================================= */
+
+div.stButton>button {
+
+    background-color: var(--fnb-primary) !important;
+
+    color: white !important;
+
+    border: none !important;
+
+    border-radius: 10px !important;
+
+    padding: 0.55rem 1.25rem !important;
+
+    font-weight: 600 !important;
+
+    transition: all 0.2s ease !important;
+}
+
+div.stButton>button:hover {
+
+    background-color: var(--fnb-accent-orange) !important;
+
+    color: black !important;
+
+    transform: translateY(-1px) !important;
+}
+
+/* =========================================================
+   TABLES
+========================================================= */
+
+table {
+
+    border-collapse: collapse !important;
+}
+
+thead tr {
+
+    background-color: #F1F5F9 !important;
+}
+
+thead th {
+
+    color: var(--text-primary) !important;
+
+    font-weight: 700 !important;
+}
+
+/* =========================================================
+   ALERTS
+========================================================= */
+
+.stAlert {
+
+    border-radius: 12px;
+}
