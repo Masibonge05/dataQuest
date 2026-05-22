@@ -17,12 +17,38 @@ RiskLens Analytics is a credit risk analytics and portfolio simulation platform 
 - Pandas
 - Scikit-learn
 - Plotly
+- Google Gemini AI
 
 ## Running the Project
 
 ### Install dependencies
 ```bash
 pip install -r requirements.txt
+```
+
+### Create Gemini API Key
+
+1. Go to Google AI Studio:
+https://aistudio.google.com/
+
+2. Sign in with your Google account.
+
+3. Click **"Get API Key"**.
+
+4. Create a new API key and copy it.
+
+### Configure Gemini API Key
+
+Create a `.env` file in the root folder of the project and add:
+
+```env
+GEMINI_API_KEY=your_api_key_here
+```
+
+Example:
+
+```env
+GEMINI_API_KEY=AIzaSyXXXXXXXXXXXXXXX
 ```
 
 ### Start the application
@@ -34,4 +60,6 @@ The app will run on:
 
 ```bash
 http://localhost:8501
-```# dataQuest
+```
+
+# dataQuest
