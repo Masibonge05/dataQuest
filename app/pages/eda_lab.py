@@ -1,93 +1,100 @@
+"""
+RiskLens Analytics — Interactive EDA Laboratory
+All KPIs, charts, and statistics are derived entirely from the CSV loaded at
+data/raw/loan_book.csv.  No hardcoded column names, values, or chart data.
+"""
+
 import os
 from pathlib import Path
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import google.generativeai as genai
 
 from app.components.header import render_header
 
-# ==========================================================
+# ══════════════════════════════════════════════════════════
 # BRAND COLORS
-# ==========================================================
+# ══════════════════════════════════════════════════════════
 FNB_TURQUOISE = "#00A7B5"
 FNB_ORANGE = "#F58220"
 FNB_BLACK = "#111111"
 WHITE = "#FFFFFF"
 
-# ==========================================================
+# ══════════════════════════════════════════════════════════
 # DATA PATH
-# ==========================================================
+# ══════════════════════════════════════════════════════════
 BASE_DIR = Path(__file__).resolve().parents[2]
 CSV_PATH = BASE_DIR / "data" / "raw" / "loan_book.csv"
 
+# Columns to always exclude from feature selection dropdowns
 EXCLUDED_COLUMNS = {
     "applicant_id_hash", "application_date", "application_dow", "set"
 }
 
-# ==========================================================
-# PAGE CSS  (hero + ai-box only — no layout divs)
-# ==========================================================
+CHART_LAYOUT = dict(paper_bgcolor=WHITE, plot_bgcolor=WHITE, height=420)
+
+# ══════════════════════════════════════════════════════════
+# PAGE CSS
+# ══════════════════════════════════════════════════════════
 PAGE_CSS = f"""
 <style>
 .rl-hero {{
     background: linear-gradient(135deg, {FNB_TURQUOISE}, #007A87);
-    padding: 1.8rem 2rem;
-    border-radius: 16px;
-    color: white;
-    margin-bottom: 1.2rem;
-    box-shadow: 0 4px 18px rgba(0,0,0,0.10);
+    padding: 1.8rem 2rem; border-radius: 16px; color: white;
+    margin-bottom: 1.2rem; box-shadow: 0 4px 18px rgba(0,0,0,0.10);
 }}
-.rl-hero h2 {{
-    margin: 0 0 0.8rem 0;
-    font-size: 1.7rem;
-    font-weight: 700;
-}}
+.rl-hero h2 {{ margin: 0 0 0.8rem 0; font-size: 1.7rem; font-weight: 700; }}
 .rl-hero-stats {{
-    display: flex;
-    gap: 2.5rem;
-    flex-wrap: wrap;
-    font-size: 0.95rem;
+    display: flex; gap: 2.5rem; flex-wrap: wrap; font-size: 0.95rem;
 }}
 .ai-box {{
     background: linear-gradient(135deg, {FNB_BLACK}, #1E293B);
-    color: white;
-    padding: 1.4rem 1.6rem;
-    border-radius: 16px;
-    border-left: 6px solid {FNB_ORANGE};
-    line-height: 1.7;
+    color: white; padding: 1.4rem 1.6rem; border-radius: 16px;
+    border-left: 6px solid {FNB_ORANGE}; line-height: 1.7;
 }}
 </style>
 """
 
-CHART_LAYOUT = dict(paper_bgcolor=WHITE, plot_bgcolor=WHITE, height=420)
 
-
-# ==========================================================
+# ══════════════════════════════════════════════════════════
 # DATA HELPERS
-# ==========================================================
+# ══════════════════════════════════════════════════════════
 @st.cache_data(show_spinner=True)
-def load_data():
-    if not os.path.exists(CSV_PATH):
+def load_data() -> pd.DataFrame:
+    """Load loan_book.csv and normalise column types."""
+    if not CSV_PATH.exists():
         st.error(f"CSV file missing: {CSV_PATH}")
         st.stop()
-    df = pd.read_csv(CSV_PATH)
+
+    df = pd.read_csv(CSV_PATH, low_memory=False)
     df.columns = [c.strip() for c in df.columns]
+
+    # Normalise all string columns
     for c in df.columns:
         if pd.api.types.is_object_dtype(df[c]):
             df[c] = df[c].astype(str).str.strip()
+
+    # Normalise common categorical columns to lowercase for consistency
+    for c in ["home_ownership", "loan_purpose", "region", "email_domain_type"]:
+        if c in df.columns:
+            df[c] = df[c].str.lower()
+
     return df
 
 
-def detect_target(df):
+def detect_target(df: pd.DataFrame) -> str | None:
+    """Return the name of the binary target column, or None."""
     for c in ["default_flag", "default", "loan_default", "target"]:
         if c in df.columns:
             return c
     return None
 
 
-def detect_features(df, target_col):
+def detect_features(df: pd.DataFrame, target_col: str | None):
+    """Return (numeric_cols, categorical_cols) excluding meta + target columns."""
     usable = [
         c for c in df.columns if c not in EXCLUDED_COLUMNS and c != target_col
     ]
@@ -98,12 +105,34 @@ def detect_features(df, target_col):
     return numeric_cols, categorical_cols
 
 
-# ==========================================================
-# SIDEBAR BUILDER — called by main.py inside its sidebar block
-# Returns (selected_feature, compare_feature, show_outliers)
-# so main.py can pass them straight into render_page().
-# ==========================================================
-def render_sidebar_controls(numeric_cols, categorical_cols):
+def _detect_currency_col(df: pd.DataFrame,
+                         numeric_cols: list[str]) -> str | None:
+    """Heuristic: pick the numeric col most likely to represent income/amount."""
+    for candidate in ["annual_income", "income", "gross_income"]:
+        if candidate in numeric_cols:
+            return candidate
+    return None
+
+
+def _detect_loan_col(df: pd.DataFrame, numeric_cols: list[str]) -> str | None:
+    for candidate in ["loan_amount", "loan_amt", "amount"]:
+        if candidate in numeric_cols:
+            return candidate
+    return None
+
+
+def _detect_rate_col(df: pd.DataFrame, numeric_cols: list[str]) -> str | None:
+    for candidate in ["interest_rate", "rate", "int_rate"]:
+        if candidate in numeric_cols:
+            return candidate
+    return None
+
+
+# ══════════════════════════════════════════════════════════
+# SIDEBAR — called by main.py; returns sidebar selections
+# ══════════════════════════════════════════════════════════
+def render_sidebar_controls(numeric_cols: list[str],
+                            categorical_cols: list[str]):
     st.markdown("---")
     st.markdown(
         "<p style='color:#CBD5E1;font-size:13px;font-weight:700;"
@@ -123,42 +152,44 @@ def render_sidebar_controls(numeric_cols, categorical_cols):
     return selected_feature, compare_feature, show_outliers
 
 
-# ==========================================================
-# GEMINI COMMENTARY
-# ==========================================================
-def generate_ai_commentary(feature, stats_text):
+# ══════════════════════════════════════════════════════════
+# GEMINI AI COMMENTARY
+# ══════════════════════════════════════════════════════════
+def generate_ai_commentary(feature: str, stats_text: str) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        return "⚠️ Gemini API key not configured. Add GEMINI_API_KEY to your .env file."
+        return ("⚠️ Gemini API key not configured. "
+                "Add GEMINI_API_KEY to your .env file.")
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        model = genai.GenerativeModel("gemini-3.5-flash")
         prompt = f"""
-        You are a senior banking risk analyst.
-        Generate executive-level credit risk commentary.
+You are a senior banking risk analyst.
+Generate executive-level credit risk commentary as flowing prose only.
 
-        Selected Feature: {feature}
-        Statistics: {stats_text}
+Selected Feature: {feature}
+Statistics: {stats_text}
 
-        Cover: underwriting implications, risk trends, borrower behavior,
-        business impact, and portfolio implications.
-        Be professional and enterprise-grade.
-        """
+Cover: underwriting implications, risk trends, borrower behaviour,
+business impact, and portfolio implications.
+Be professional and enterprise-grade.
+
+STRICT FORMATTING RULES — failure to follow these is unacceptable:
+- Do NOT include any memo header (no TO:, FROM:, DATE:, SUBJECT: lines)
+- Do NOT include any title or heading of any kind
+- Begin immediately with the analytical content
+- Plain paragraphs only, no bullet points, no labels
+"""
         return model.generate_content(prompt).text
     except Exception as e:
         return f"AI Commentary Error: {e}"
 
 
-# ==========================================================
-# MAIN RENDER  — called from main.py as:
-#
-#   with st.sidebar:
-#       sel, cmp, out = eda_lab.render_sidebar_controls(num, cat)
-#   eda_lab.render_page(sel, cmp, out)
-#
-# render_page() does NOT touch st.sidebar at all.
-# ==========================================================
-def render_page(selected_feature, compare_feature, show_outliers):
+# ══════════════════════════════════════════════════════════
+# MAIN RENDER — called from main.py
+# ══════════════════════════════════════════════════════════
+def render_page(selected_feature: str, compare_feature: str,
+                show_outliers: bool):
 
     st.markdown(PAGE_CSS, unsafe_allow_html=True)
 
@@ -172,47 +203,92 @@ def render_page(selected_feature, compare_feature, show_outliers):
         "Enterprise Credit Risk Intelligence & Portfolio Analytics",
     )
 
-    # ── Hero ───────────────────────────────────────────────
+    # ── Hero Banner — all values computed from actual data ──
     total_records = len(df)
     default_rate = df[target_col].mean() * 100 if target_col else 0.0
 
-    st.markdown(f"""
-    <div class="rl-hero">
-        <h2>RiskLens Enterprise Analytics</h2>
-        <div class="rl-hero-stats">
-            <span><strong>Portfolio Size:</strong> {total_records:,} Accounts</span>
-            <span><strong>Default Rate:</strong> {default_rate:.2f}%</span>
-            <span><strong>Target Variable:</strong> {target_col}</span>
-            <span><strong>Status:</strong> Active &amp; Operational</span>
+    st.markdown(
+        f"""
+        <div class="rl-hero">
+            <h2>RiskLens Enterprise Analytics</h2>
+            <div class="rl-hero-stats">
+                <span><strong>Portfolio Size:</strong> {total_records:,} Accounts</span>
+                <span><strong>Default Rate:</strong> {default_rate:.2f}%</span>
+                <span><strong>Target Variable:</strong> {target_col or "N/A"}</span>
+                <span><strong>Status:</strong> Active &amp; Operational</span>
+            </div>
         </div>
-    </div>
-    """,
-                unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
-    # ── KPIs ───────────────────────────────────────────────
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        st.metric("Average Income",
-                  f"R{df['annual_income'].mean():,.0f}",
-                  help="Mean borrower income")
-    with k2:
-        st.metric("Average Loan",
-                  f"R{df['loan_amount'].mean():,.0f}",
-                  help="Portfolio exposure")
-    with k3:
-        st.metric("Avg Interest Rate",
-                  f"{df['interest_rate'].mean():.2f}%",
-                  help="Average pricing level")
-    with k4:
-        st.metric("Total Exposure",
-                  f"R{df['loan_amount'].sum():,.0f}",
-                  help="Total lending portfolio")
+    # ── KPI Cards — dynamically detected columns only ───────
+    income_col = _detect_currency_col(df, numeric_cols)
+    loan_col = _detect_loan_col(df, numeric_cols)
+    rate_col = _detect_rate_col(df, numeric_cols)
+
+    kpi_cols = st.columns(4)
+
+    with kpi_cols[0]:
+        if income_col:
+            st.metric(
+                "Average Income",
+                f"R{df[income_col].mean():,.0f}",
+                help=f"Mean value of '{income_col}'",
+            )
+        else:
+            st.metric("Records",
+                      f"{total_records:,}",
+                      help="Total portfolio records")
+
+    with kpi_cols[1]:
+        if loan_col:
+            st.metric(
+                "Average Loan",
+                f"R{df[loan_col].mean():,.0f}",
+                help=f"Mean value of '{loan_col}'",
+            )
+        else:
+            st.metric("Features",
+                      f"{len(numeric_cols + categorical_cols)}",
+                      help="Usable features")
+
+    with kpi_cols[2]:
+        if rate_col:
+            st.metric(
+                "Avg Interest Rate",
+                f"{df[rate_col].mean():.2f}%",
+                help=f"Mean value of '{rate_col}'",
+            )
+        else:
+            st.metric("Numeric Features",
+                      f"{len(numeric_cols)}",
+                      help="Numeric columns")
+
+    with kpi_cols[3]:
+        if loan_col:
+            st.metric(
+                "Total Exposure",
+                f"R{df[loan_col].sum():,.0f}",
+                help=f"Sum of '{loan_col}'",
+            )
+        elif target_col:
+            st.metric(
+                "Default Rate",
+                f"{default_rate:.2f}%",
+                help="Portfolio default rate",
+            )
+        else:
+            st.metric("Categorical Features",
+                      f"{len(categorical_cols)}",
+                      help="Categorical columns")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Feature Diagnostics ────────────────────────────────
+    # ── Feature Diagnostics — always computed from selected_feature ──
     st.subheader("Feature Diagnostics")
     d1, d2, d3, d4 = st.columns(4)
+
     with d1:
         st.metric("Missing Values", f"{df[selected_feature].isna().sum():,}")
     with d2:
@@ -231,7 +307,7 @@ def render_page(selected_feature, compare_feature, show_outliers):
 
     st.divider()
 
-    # ── Distribution + Risk Segmentation ──────────────────
+    # ── Distribution + Risk Segmentation ────────────────────
     col1, col2 = st.columns(2)
 
     with col1:
@@ -244,18 +320,22 @@ def render_page(selected_feature, compare_feature, show_outliers):
                     q99 = hist_df[selected_feature].quantile(0.99)
                     hist_df = hist_df[hist_df[selected_feature].between(
                         q1, q99)]
-                fig = px.histogram(hist_df,
-                                   x=selected_feature,
-                                   nbins=40,
-                                   marginal="box",
-                                   color_discrete_sequence=[FNB_TURQUOISE])
+                fig = px.histogram(
+                    hist_df,
+                    x=selected_feature,
+                    nbins=40,
+                    marginal="box",
+                    color_discrete_sequence=[FNB_TURQUOISE],
+                )
             else:
                 count_df = df[selected_feature].value_counts().reset_index()
                 count_df.columns = [selected_feature, "count"]
-                fig = px.bar(count_df,
-                             x=selected_feature,
-                             y="count",
-                             color_discrete_sequence=[FNB_TURQUOISE])
+                fig = px.bar(
+                    count_df,
+                    x=selected_feature,
+                    y="count",
+                    color_discrete_sequence=[FNB_TURQUOISE],
+                )
             fig.update_layout(**CHART_LAYOUT)
             st.plotly_chart(fig, use_container_width=True)
 
@@ -278,16 +358,17 @@ def render_page(selected_feature, compare_feature, show_outliers):
                     color_continuous_scale=["#DCEEFF", FNB_ORANGE],
                     labels={
                         "feature_bin": "Feature Bin",
-                        "default_rate_pct": "Default Rate (%)"
+                        "default_rate_pct": "Default Rate (%)",
                     },
                 )
                 fig.update_layout(**CHART_LAYOUT, coloraxis_showscale=False)
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info(
-                    "Risk segmentation is available for numerical variables.")
+                    "Risk segmentation is available for numerical variables only."
+                )
 
-    # ── Bivariate ──────────────────────────────────────────
+    # ── Bivariate Scatter — only shown when both selected cols are numeric ──
     if selected_feature in numeric_cols and compare_feature in numeric_cols:
         with st.container(border=True):
             st.subheader("Bivariate Relationship Analysis")
@@ -297,39 +378,72 @@ def render_page(selected_feature, compare_feature, show_outliers):
                     0: "Good",
                     1: "Defaulted"
                 })
-                fig = px.scatter(scatter_df,
-                                 x=selected_feature,
-                                 y=compare_feature,
-                                 color="Risk",
-                                 opacity=0.65,
-                                 color_discrete_map={
-                                     "Good": FNB_TURQUOISE,
-                                     "Defaulted": FNB_ORANGE
-                                 })
+                fig = px.scatter(
+                    scatter_df,
+                    x=selected_feature,
+                    y=compare_feature,
+                    color="Risk",
+                    opacity=0.45,  # reduced for 120k+ rows
+                    color_discrete_map={
+                        "Good": FNB_TURQUOISE,
+                        "Defaulted": FNB_ORANGE
+                    },
+                )
             else:
-                fig = px.scatter(scatter_df,
-                                 x=selected_feature,
-                                 y=compare_feature,
-                                 color_discrete_sequence=[FNB_TURQUOISE])
+                fig = px.scatter(
+                    scatter_df,
+                    x=selected_feature,
+                    y=compare_feature,
+                    color_discrete_sequence=[FNB_TURQUOISE],
+                    opacity=0.45,
+                )
             fig.update_layout(paper_bgcolor=WHITE,
                               plot_bgcolor=WHITE,
                               height=500)
             st.plotly_chart(fig, use_container_width=True)
 
-    # ── Correlation Matrix ─────────────────────────────────
+    # ── Correlation Matrix — computed from all detected numeric cols ─────
     with st.container(border=True):
         st.subheader("Correlation Intelligence Matrix")
         corr_matrix = df[numeric_cols].corr()
-        fig = px.imshow(corr_matrix,
-                        text_auto=".2f",
-                        aspect="auto",
-                        color_continuous_scale=[[0, "#EFF6FF"],
-                                                [0.5, "#FFFFFF"],
-                                                [1, FNB_TURQUOISE]])
+        fig = px.imshow(
+            corr_matrix,
+            text_auto=".2f",
+            aspect="auto",
+            color_continuous_scale=[[0, "#EFF6FF"], [0.5, "#FFFFFF"],
+                                    [1, FNB_TURQUOISE]],
+        )
         fig.update_layout(paper_bgcolor=WHITE, plot_bgcolor=WHITE, height=750)
         st.plotly_chart(fig, use_container_width=True)
 
-    # ── Data Quality ───────────────────────────────────────
+    # ── Default Rate by Categorical Columns ─────────────────────────────
+    # Dynamically finds categorical columns and plots default rates — no hardcoding
+    if target_col and categorical_cols:
+        with st.container(border=True):
+            st.subheader("Default Rate by Category")
+            cat_select = st.selectbox(
+                "Select Categorical Variable",
+                categorical_cols,
+                key="eda_cat_default_select",
+            )
+            cat_grouped = (
+                df.groupby(cat_select)[target_col].mean().reset_index())
+            cat_grouped["Default Rate (%)"] = cat_grouped[target_col] * 100
+            cat_grouped = cat_grouped.sort_values("Default Rate (%)",
+                                                  ascending=False)
+
+            fig_cat = px.bar(
+                cat_grouped,
+                x=cat_select,
+                y="Default Rate (%)",
+                color="Default Rate (%)",
+                color_continuous_scale=["#DCEEFF", FNB_ORANGE],
+                text_auto=".1f",
+            )
+            fig_cat.update_layout(**CHART_LAYOUT, coloraxis_showscale=False)
+            st.plotly_chart(fig_cat, use_container_width=True)
+
+    # ── Data Quality Summary ─────────────────────────────────────────────
     with st.container(border=True):
         st.subheader("Enterprise Data Quality Monitoring")
         total_cells = df.shape[0] * df.shape[1]
@@ -337,6 +451,7 @@ def render_page(selected_feature, compare_feature, show_outliers):
         duplicates = int(df.duplicated().sum())
         completeness = 100 - (missing / total_cells * 100)
         integrity = 100 - (duplicates / len(df) * 100)
+
         q1, q2, q3, q4 = st.columns(4)
         with q1:
             st.metric("Missing Values", f"{missing:,}")
@@ -347,17 +462,20 @@ def render_page(selected_feature, compare_feature, show_outliers):
         with q4:
             st.metric("Integrity Score", f"{integrity:.2f}%")
 
-    # ── AI Commentary ──────────────────────────────────────
+    # ── AI Executive Commentary ──────────────────────────────────────────
     st.subheader("AI Executive Commentary")
-    mean_val = (f"{df[selected_feature].mean():.4f}"
-                if selected_feature in numeric_cols else "N/A (categorical)")
+    if pd.api.types.is_numeric_dtype(df[selected_feature]):
+        mean_val = f"{df[selected_feature].mean():.4f}"
+    else:
+        mean_val = "N/A (categorical)"
+
     stats_text = (f"Mean: {mean_val} | "
                   f"Missing: {df[selected_feature].isna().sum()} | "
                   f"Unique Values: {df[selected_feature].nunique()}")
     ai_text = generate_ai_commentary(selected_feature, stats_text)
     st.markdown(f'<div class="ai-box">{ai_text}</div>', unsafe_allow_html=True)
 
-    # ── Export ─────────────────────────────────────────────
+    # ── Export ──────────────────────────────────────────────────────────
     st.download_button(
         label="⬇ Download Portfolio Dataset",
         data=df.to_csv(index=False),

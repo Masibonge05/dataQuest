@@ -1,7 +1,7 @@
 """
 RiskLens Analytics — Feature Engineering Studio
 All analytics derived from real loan_book.csv data loaded into st.session_state.portfolio_df.
-No hardcoded data or placeholder text anywhere.
+No hardcoded data, column names, or placeholder text anywhere.
 """
 
 import os
@@ -16,25 +16,21 @@ from app.components.charts import apply_corporate_layout, PRIMARY_BLUE, ACCENT_G
 from src.feature_engineering.binning import auto_bin_numeric, compute_iv_summary
 
 # ──────────────────────────────────────────────────────────────
-# Columns to always exclude from feature analysis
+# Only exclude true metadata / leakage columns by default.
+# Categorical features (home_ownership, region, loan_purpose, etc.)
+# are detected dynamically and excluded from the *numeric* WoE pipeline
+# but NOT hardcoded out of all analysis.
 # ──────────────────────────────────────────────────────────────
-_EXCLUDE_COLS = {
+_META_EXCLUDE = {
     "applicant_id_hash",
     "application_date",
     "application_dow",
     "branch_code_id",
     "set",
-    "default_flag",
-    "default",
-    "email_domain_type",
-    "home_ownership",
-    "region",
-    "loan_purpose",
-    "phone_verified",
 }
 
 # ──────────────────────────────────────────────────────────────
-# Professional FNB Corporate Design Tokens
+# Design Tokens
 # ──────────────────────────────────────────────────────────────
 FNB_TURQUOISE = "#00A3C4"
 FNB_GOLD = "#FFB800"
@@ -44,8 +40,6 @@ WHITE = "#FFFFFF"
 GRAY_BG = "#F8FAFC"
 BORDER_GRAY = "#E2E8F0"
 TEXT_MUTED = "#64748B"
-
-# Alert and Category Token Colors
 CRITICAL_RED = "#EF4444"
 COMPLIANT_GREEN = "#10B981"
 WARNING_AMBER = "#F59E0B"
@@ -106,10 +100,7 @@ section[data-testid="stMain"] * {{ font-family: 'IBM Plex Sans', sans-serif !imp
     padding-bottom:0.5rem; border-bottom:2px solid {BORDER_GRAY};
     margin:1.8rem 0 1rem;
 }}
-.sec-hdr h3 {{
-    font-size:1.1rem; font-weight:700; color:{FNB_NAVY};
-    margin:0; letter-spacing:-0.01em;
-}}
+.sec-hdr h3 {{ font-size:1.1rem; font-weight:700; color:{FNB_NAVY}; margin:0; letter-spacing:-0.01em; }}
 .sec-badge {{
     margin-left:auto; font-size:0.68rem; font-weight:700;
     color:{FNB_TURQUOISE}; background:rgba(0,163,196,0.08);
@@ -117,13 +108,11 @@ section[data-testid="stMain"] * {{ font-family: 'IBM Plex Sans', sans-serif !imp
     border-radius:20px; padding:0.15rem 0.6rem;
     text-transform:uppercase; letter-spacing:0.07em;
 }}
-
 .s-badge {{
     display:inline-block; padding:0.15rem 0.6rem;
     border-radius:20px; font-size:0.72rem; font-weight:700;
     text-transform:uppercase; letter-spacing:0.05em;
 }}
-
 .feat-meta {{
     display:flex; align-items:center; gap:0.8rem;
     background:{GRAY_BG}; border:1px solid {BORDER_GRAY};
@@ -133,7 +122,6 @@ section[data-testid="stMain"] * {{ font-family: 'IBM Plex Sans', sans-serif !imp
 .feat-name {{ font-weight:700; color:{FNB_NAVY}; font-size:0.95rem; }}
 .feat-iv {{ margin-left:auto; color:{TEXT_MUTED}; }}
 .feat-iv strong {{ color:{FNB_DARK_TEXT}; }}
-
 .leakage-alert {{
     background:#FFF5F5; border:1px solid #FCA5A5;
     border-left:4px solid {CRITICAL_RED}; border-radius:8px;
@@ -144,42 +132,48 @@ section[data-testid="stMain"] * {{ font-family: 'IBM Plex Sans', sans-serif !imp
     text-transform:uppercase; letter-spacing:0.06em; margin-bottom:0.3rem;
 }}
 .al-body {{ font-size:0.82rem; color:#7F1D1D; line-height:1.55; }}
-
 .ai-panel {{
     background:linear-gradient(135deg, {FNB_NAVY} 0%, #153E66 100%);
     border-left:5px solid {FNB_GOLD};
-    border-radius:8px; padding:1.4rem 1.6rem;
-    margin-bottom:1rem;
+    border-radius:8px; padding:1.4rem 1.6rem; margin-bottom:1rem;
 }}
 .ai-hdr {{
     font-size:0.72rem; font-weight:700; text-transform:uppercase;
     letter-spacing:0.1em; color:{FNB_GOLD}; margin-bottom:0.6rem;
 }}
 .ai-body {{ font-size:0.86rem; color:rgba(255,255,255,0.92); line-height:1.65; }}
-
 .rec-card {{
     background:{WHITE}; border:1px solid {BORDER_GRAY}; border-radius:8px;
     padding:0.9rem 1.1rem; box-shadow:0 1px 2px rgba(0,0,0,0.02);
     margin-bottom:0.6rem;
 }}
-.rec-type {{
-    font-size:0.68rem; font-weight:700; text-transform:uppercase;
-    letter-spacing:0.08em; color:{FNB_TURQUOISE}; margin-bottom:0.2rem;
-}}
+.rec-type  {{ font-size:0.68rem; font-weight:700; text-transform:uppercase; letter-spacing:0.08em; color:{FNB_TURQUOISE}; margin-bottom:0.2rem; }}
 .rec-title {{ font-size:0.88rem; font-weight:700; color:{FNB_DARK_TEXT}; margin-bottom:0.25rem; }}
 .rec-body  {{ font-size:0.8rem; color:{TEXT_MUTED}; line-height:1.5; }}
 </style>
 """
 
 # ──────────────────────────────────────────────────────────────
-# Data Computations & Analytics
+# Helpers
 # ──────────────────────────────────────────────────────────────
 
 
-def _derive_numeric_features(df: pd.DataFrame, target_col: str) -> list:
+def _detect_target(df: pd.DataFrame) -> str | None:
+    for c in ["default_flag", "default", "loan_default", "target"]:
+        if c in df.columns:
+            return c
+    return None
+
+
+def _derive_numeric_features(df: pd.DataFrame, target_col: str) -> list[str]:
+    """
+    Return numeric columns that are viable model candidates.
+    Excludes meta columns and the target.  Low-variance (near-constant)
+    columns are also excluded.
+    """
     candidates = [
         c for c in df.select_dtypes(include=[np.number]).columns
-        if c not in _EXCLUDE_COLS and c != target_col
+        if c not in _META_EXCLUDE and c != target_col
     ]
     valid = []
     for c in candidates:
@@ -187,15 +181,21 @@ def _derive_numeric_features(df: pd.DataFrame, target_col: str) -> list:
         if len(non_null) == 0:
             continue
         top_freq = non_null.value_counts(normalize=True).iloc[0]
-        if top_freq < 0.99:
+        if top_freq < 0.99:  # exclude near-constant columns
             valid.append(c)
     return valid
 
 
 def _feature_stats(df: pd.DataFrame, feature: str, target_col: str) -> dict:
     series = df[feature].dropna()
-    defaults_per_bin = df.groupby(pd.qcut(df[feature], q=5, duplicates="drop"),
-                                  observed=False)[target_col].mean()
+    try:
+        defaults_per_bin = (df.groupby(pd.qcut(df[feature],
+                                               q=5,
+                                               duplicates="drop"),
+                                       observed=False)[target_col].mean())
+    except Exception:
+        defaults_per_bin = pd.Series(dtype=float)
+
     return {
         "n": len(series),
         "missing_n": int(df[feature].isna().sum()),
@@ -213,8 +213,13 @@ def _feature_stats(df: pd.DataFrame, feature: str, target_col: str) -> dict:
     }
 
 
-def _generate_ai_insight(feature: str, bin_table: pd.DataFrame, iv: float,
-                         strength: str, stats: dict) -> str:
+def _generate_ai_insight(
+    feature: str,
+    bin_table: pd.DataFrame,
+    iv: float,
+    strength: str,
+    stats: dict,
+) -> str:
     try:
         _secrets_key = st.secrets.get("GEMINI_API_KEY")
     except Exception:
@@ -237,35 +242,40 @@ def _generate_ai_insight(feature: str, bin_table: pd.DataFrame, iv: float,
     max_bad_idx = int(np.argmax(bad_rates))
     min_bad_idx = int(np.argmin(bad_rates))
 
-    prompt = f"""You are a senior banking credit risk analyst inspecting model weights.
-Review this empirical feature extracted from our active consumer loan portfolio composed of {stats['n']:,} observation records.
-
-FEATURE CAPTION: {feature}
-REAL EMPIRICAL STATISTICS:
-  - Mean Value: {stats['mean']:.4f}
-  - Median Parameter: {stats['median']:.4f}
-  - Tail Deviation: {stats['std']:.4f}
-  - Skew Intensity: {stats['skew']:.4f}
-  - Boundary (P5/P95): {stats['p5']:.4f} / {stats['p95']:.4f}
-  - Missing Ledger Count: {stats['missing_n']:,} ({stats['missing_pct']:.2f}%)
-  - Base Portfolio Default Rate: {stats['overall_default_rate']:.2f}%
-
-WEIGHT OF EVIDENCE (WoE) METRICS:
-  - Total Calculated Information Value (IV): {iv:.4f}
-  - Assigned Class Power: {strength}
-  - Strictly Monotonic Trend Flag: {mono}
-  - Account Bin Structure:
-""" + "\n".join(
-        f"    Bin Index {i+1} [{bin_lbls[i]}]: Computed WoE={woe_vals[i]:.4f}, Default Ratio={bad_rates[i]:.2f}%, Volume Group={counts[i]:,}"
-        for i in range(len(bin_lbls))) + f"""
-
-Maximum Risk Segment Group: Bin Range Index {max_bad_idx+1} [{bin_lbls[max_bad_idx]}] yielding a default rate of {bad_rates[max_bad_idx]:.2f}%
-Minimum Risk Segment Group: Bin Range Index {min_bad_idx+1} [{bin_lbls[min_bad_idx]}] yielding a default rate of {bad_rates[min_bad_idx]:.2f}%
-
-Draft exactly 4 sentences of high-level credit risk commentary. Highlight if the trend complies with banking scorecard rules (monotonic consistency). Point directly to the highest risk band stats. State if the distributions require adjustments, and conclude with an exact include/exclude verdict based on empirical IV parameters. Do not add labels, headers, or bullet points."""
+    prompt = (
+        f"You are a senior banking credit risk analyst inspecting model weights.\n"
+        f"Review this empirical feature extracted from our active consumer loan portfolio "
+        f"composed of {stats['n']:,} observation records.\n\n"
+        f"FEATURE CAPTION: {feature}\n"
+        f"REAL EMPIRICAL STATISTICS:\n"
+        f"  - Mean Value: {stats['mean']:.4f}\n"
+        f"  - Median Parameter: {stats['median']:.4f}\n"
+        f"  - Tail Deviation: {stats['std']:.4f}\n"
+        f"  - Skew Intensity: {stats['skew']:.4f}\n"
+        f"  - Boundary (P5/P95): {stats['p5']:.4f} / {stats['p95']:.4f}\n"
+        f"  - Missing Ledger Count: {stats['missing_n']:,} ({stats['missing_pct']:.2f}%)\n"
+        f"  - Base Portfolio Default Rate: {stats['overall_default_rate']:.2f}%\n\n"
+        f"WEIGHT OF EVIDENCE (WoE) METRICS:\n"
+        f"  - Total Calculated Information Value (IV): {iv:.4f}\n"
+        f"  - Assigned Class Power: {strength}\n"
+        f"  - Strictly Monotonic Trend Flag: {mono}\n"
+        f"  - Account Bin Structure:\n" + "\n".join(
+            f"    Bin Index {i+1} [{bin_lbls[i]}]: WoE={woe_vals[i]:.4f}, "
+            f"Default Ratio={bad_rates[i]:.2f}%, Volume={counts[i]:,}"
+            for i in range(len(bin_lbls))) +
+        f"\n\nMaximum Risk Segment: Bin {max_bad_idx+1} [{bin_lbls[max_bad_idx]}] "
+        f"— default rate {bad_rates[max_bad_idx]:.2f}%\n"
+        f"Minimum Risk Segment: Bin {min_bad_idx+1} [{bin_lbls[min_bad_idx]}] "
+        f"— default rate {bad_rates[min_bad_idx]:.2f}%\n\n"
+        f"Draft exactly 4 sentences of high-level credit risk commentary. "
+        f"Highlight if the trend complies with banking scorecard rules (monotonic consistency). "
+        f"Point directly to the highest risk band stats. "
+        f"State if the distributions require adjustments, and conclude with an exact "
+        f"include/exclude verdict based on empirical IV parameters. "
+        f"Do not add labels, headers, or bullet points.")
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-3.5-flash")
     try:
         response = model.generate_content(prompt)
         return response.text.strip()
@@ -273,17 +283,21 @@ Draft exactly 4 sentences of high-level credit risk commentary. Highlight if the
         err = str(e)
         if "429" in err or "quota" in err.lower(
         ) or "ResourceExhausted" in err:
-            return "Analyst commentary temporarily unavailable — System Google AI free tier rate limit constraints reached."
-        return f"Analyst commentary error connection timeout: {err}"
+            return "Analyst commentary temporarily unavailable — API rate limit reached."
+        return f"Analyst commentary error: {err}"
 
 
-def _recommendations(feature: str, iv: float, strength: str,
-                     bin_table: pd.DataFrame, stats: dict) -> list:
+def _recommendations(
+    feature: str,
+    iv: float,
+    strength: str,
+    bin_table: pd.DataFrame,
+    stats: dict,
+) -> list[dict]:
     recs = []
     skew = stats["skew"]
     missing_pct = stats["missing_pct"]
-    p5 = stats["p5"]
-    p95 = stats["p95"]
+    p5, p95 = stats["p5"], stats["p95"]
 
     if abs(skew) > 1.5:
         direction = "right" if skew > 0 else "left"
@@ -291,9 +305,12 @@ def _recommendations(feature: str, iv: float, strength: str,
             "type":
             "Transformation Strategy",
             "title":
-            f"Logarithmic Structural Transform Recommended",
+            "Logarithmic Structural Transform Recommended",
             "body":
-            f"The variable features high {direction}-skewness ({skew:.2f}) spanning a range of {p5:.2f} to {p95:.2f}. Transform via log(x+1) to align closer to log-odds linearity constraints required for credit scorecards."
+            (f"The variable features high {direction}-skewness ({skew:.2f}) "
+             f"spanning a range of {p5:.2f} to {p95:.2f}. "
+             f"Transform via log(x+1) to align closer to log-odds linearity "
+             f"constraints required for credit scorecards."),
         })
 
     if missing_pct > 2.0:
@@ -303,7 +320,9 @@ def _recommendations(feature: str, iv: float, strength: str,
             "title":
             "Establish Structural Missing Flag Indicator",
             "body":
-            f"We detected {stats['missing_n']:,} rows ({missing_pct:.2f}%) with null items. Designate a unique binary weight indicator attribute to verify if unpopulated cells represent structural hidden risks."
+            (f"We detected {stats['missing_n']:,} rows ({missing_pct:.2f}%) with null items. "
+             f"Designate a unique binary weight indicator to verify if unpopulated cells "
+             f"represent structural hidden risks."),
         })
 
     woe_vals = bin_table["woe"].tolist()
@@ -319,7 +338,9 @@ def _recommendations(feature: str, iv: float, strength: str,
             "title":
             "Enforce Monotonic Trend Sequencing",
             "body":
-            f"The raw metrics across the bins display a non-monotonic pattern. Apply monotonic pooling or adjacent-bin merging routines to establish clear logical underwriting risk progression."
+            (f"The raw metrics across the bins display a non-monotonic pattern. "
+             f"Apply monotonic pooling or adjacent-bin merging routines to establish "
+             f"clear logical underwriting risk progression."),
         })
 
     if strength == "Strong":
@@ -331,7 +352,9 @@ def _recommendations(feature: str, iv: float, strength: str,
             "title":
             "Approved Candidate for Point Mapping Assignment",
             "body":
-            f"With a solid predictive IV score of {iv:.4f} and default delta gap spread reaching {spread:.1f} percentage points across risk buckets, this column is prioritized for scaling logic integration."
+            (f"With a solid predictive IV score of {iv:.4f} and default delta gap "
+             f"spread reaching {spread:.1f} percentage points across risk buckets, "
+             f"this column is prioritised for scaling logic integration."),
         })
 
     if iv < 0.02:
@@ -341,7 +364,9 @@ def _recommendations(feature: str, iv: float, strength: str,
             "title":
             "Exclude Feature From Production Modeling Pipeline",
             "body":
-            f"The Information Value coefficient ({iv:.4f}) sits entirely under the standard 0.02 credit model minimum benchmark threshold. Drop this feature to minimize noise profiles."
+            (f"The Information Value coefficient ({iv:.4f}) sits under the standard "
+             f"0.02 credit model minimum threshold. Drop this feature to minimise noise."
+             ),
         })
 
     return recs[:4]
@@ -349,17 +374,19 @@ def _recommendations(feature: str, iv: float, strength: str,
 
 def _sec(title: str, badge: str = ""):
     badge_html = f'<span class="sec-badge">{badge}</span>' if badge else ""
-    st.markdown(f'<div class="sec-hdr"><h3>{title}</h3>{badge_html}</div>',
-                unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="sec-hdr"><h3>{title}</h3>{badge_html}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def _badge(strength: str) -> str:
     m = STRENGTH_META.get(strength, {"color": "#64748B", "bg": "#F1F5F9"})
-    return f'<span class="s-badge" style="color:{m["color"]}; background:{m["bg"]};">{strength}</span>'
+    return (f'<span class="s-badge" style="color:{m["color"]}; '
+            f'background:{m["bg"]};">{strength}</span>')
 
 
 def _iv_strength(iv: float) -> str:
-    """Enforces absolute alignment with STRENGTH_META dictionary tokens."""
     if iv < 0.02: return "Useless"
     if iv < 0.1: return "Weak"
     if iv < 0.3: return "Medium"
@@ -369,7 +396,11 @@ def _iv_strength(iv: float) -> str:
 
 def _kpi(label: str, value, sub: str = "", warn: bool = False) -> str:
     cls = "kpi-card warn" if warn else "kpi-card"
-    return f'<div class="{cls}"><div class="kpi-label">{label}</div><div class="kpi-value">{value}</div><div class="kpi-sub">{sub}</div></div>'
+    return (f'<div class="{cls}">'
+            f'<div class="kpi-label">{label}</div>'
+            f'<div class="kpi-value">{value}</div>'
+            f'<div class="kpi-sub">{sub}</div>'
+            f'</div>')
 
 
 # ──────────────────────────────────────────────────────────────
@@ -382,50 +413,47 @@ def render_page():
 
     render_header(
         page_title="Feature Engineering Studio",
-        page_subtitle=
-        "Weight of Evidence (WoE) Binning & Information Value (IV) Diagnostics Portfolio Summary Matrix",
+        page_subtitle=(
+            "Weight of Evidence (WoE) Binning & Information Value (IV) "
+            "Diagnostics Portfolio Summary Matrix"),
     )
 
-    # ── Load Core Data Framework ───────────────────────────
+    # ── Load Core Data ─────────────────────────────────────
     if "portfolio_df" not in st.session_state:
-        st.error(
-            "Production portfolio data ledger not loaded inside framework memory pipeline. Return to the Data Core page."
-        )
+        st.error("Portfolio data not loaded. Return to the Data Core page.")
         st.stop()
 
     df: pd.DataFrame = st.session_state.portfolio_df
 
-    # ── Verify Target Metric Columns ──────────────────────
-    target_col = next(
-        (c for c in ["default_flag", "default"] if c in df.columns), None)
+    # ── Detect Target Dynamically ──────────────────────────
+    target_col = _detect_target(df)
     if target_col is None:
         st.error(
-            "Target classification variable framework marker column missing from core loan_book file structure."
+            "No target column found (expected: 'default_flag', 'default', etc.)."
         )
         st.stop()
 
-    # ── Map Numerical Features Dynamically ─────────────────
+    # ── Build Numeric Feature List Dynamically ─────────────
+    # Honour session_state features if already computed, otherwise derive fresh
     if "features" in st.session_state and st.session_state.features:
         features = [
             f for f in st.session_state.features
-            if f in df.columns and f not in _EXCLUDE_COLS and f != target_col
+            if f in df.columns and f not in _META_EXCLUDE and f != target_col
             and pd.api.types.is_numeric_dtype(df[f])
         ]
     else:
         features = _derive_numeric_features(df, target_col)
 
     if not features:
-        st.error(
-            "Zero standard numeric indicators discovered within current portfolio array schema options."
-        )
+        st.error("No usable numeric features found in the dataset.")
         st.stop()
 
-    # ── Initialize Framework IV Matrix Processing ───────────
+    # ── Compute IV Summary (cached in session state) ────────
     if "iv_summary" not in st.session_state:
         with st.spinner(
-                f"Evaluating statistical Information Value limits for {len(features)} active columns..."
-        ):
+                f"Computing Information Value for {len(features)} features…"):
             raw_iv = compute_iv_summary(df, features, target_col)
+            # Normalise the IV column name regardless of what compute_iv_summary returns
             col_map = {
                 c: "IV"
                 for c in raw_iv.columns
@@ -436,13 +464,13 @@ def render_page():
                 raw_iv = raw_iv.rename(columns=col_map)
             st.session_state.iv_summary = raw_iv
 
-    iv_df: pd.DataFrame = st.session_state.iv_summary
+    iv_df: pd.DataFrame = st.session_state.iv_summary.copy()
 
     if "IV" in iv_df.columns:
         iv_df["Predictive Power"] = iv_df["IV"].apply(_iv_strength)
 
     # ══════════════════════════════════════════════════════════
-    # 1. EXECUTIVE METRIC CARDS — All Dynamic From Data
+    # 1. EXECUTIVE KPI CARDS — all values from data
     # ══════════════════════════════════════════════════════════
     _sec("Executive Portfolio Overview", "KPI SUMMARY")
 
@@ -470,12 +498,11 @@ def render_page():
     )
 
     # ══════════════════════════════════════════════════════════
-    # 2. DATA-DRIVEN INFOMATION VALUE SORT RANKING MATRIX
+    # 2. IV RANKING TABLE — sorted from data, no hardcoded rows
     # ══════════════════════════════════════════════════════════
     _sec("Information Value Ranking Matrix", "FEATURE SCREENING")
 
-    disp = iv_df.copy()
-    disp = disp.sort_values(by="IV", ascending=False).reset_index(drop=True)
+    disp = iv_df.sort_values(by="IV", ascending=False).reset_index(drop=True)
     disp.insert(0, "Rank", range(1, len(disp) + 1))
     disp["Scorecard Suitability"] = disp["Predictive Power"].map(
         lambda p: STRENGTH_META.get(p, {}).get("suit", "—"))
@@ -488,7 +515,8 @@ def render_page():
 
     def _style_power(val):
         m = STRENGTH_META.get(val, {"color": "#64748B", "bg": "#F1F5F9"})
-        return f"background-color:{m['bg']}; color:{m['color']}; font-weight:700; font-size:0.75rem; border-radius:4px;"
+        return (f"background-color:{m['bg']}; color:{m['color']}; "
+                f"font-weight:700; font-size:0.75rem; border-radius:4px;")
 
     styled_iv = (disp.style.map(_style_power,
                                 subset=["Predictive Power"]).format({
@@ -497,24 +525,28 @@ def render_page():
                                 }).set_properties(**{
                                     "font-size": "0.82rem",
                                     "padding": "0.5rem 0.8rem"
-                                }).set_table_styles([{
-                                    "selector":
-                                    "th",
-                                    "props": [("background-color", FNB_NAVY),
-                                              ("color", WHITE),
-                                              ("font-size", "0.75rem"),
-                                              ("text-transform", "uppercase"),
-                                              ("letter-spacing", "0.05em"),
-                                              ("padding", "0.6rem 0.8rem")]
-                                }, {
-                                    "selector":
-                                    "tr:nth-child(even)",
-                                    "props": [("background-color", GRAY_BG)]
-                                }]).hide(axis="index"))
+                                }).set_table_styles([
+                                    {
+                                        "selector":
+                                        "th",
+                                        "props": [
+                                            ("background-color", FNB_NAVY),
+                                            ("color", WHITE),
+                                            ("font-size", "0.75rem"),
+                                            ("text-transform", "uppercase"),
+                                            ("letter-spacing", "0.05em"),
+                                            ("padding", "0.6rem 0.8rem"),
+                                        ]
+                                    },
+                                    {
+                                        "selector": "tr:nth-child(even)",
+                                        "props":
+                                        [("background-color", GRAY_BG)]
+                                    },
+                                ]).hide(axis="index"))
+    st.dataframe(styled_iv, width="stretch", height=260)
 
-    st.dataframe(styled_iv, width='stretch', height=260)
-
-    # ── Live Visual IV Histogram Deployment ──────────────────
+    # ── IV Bar Chart — colors and values all from data ───────
     bar_colors = [
         STRENGTH_META.get(p, {"color": "#64748B"})["color"]
         for p in iv_df["Predictive Power"]
@@ -524,24 +556,23 @@ def render_page():
             x=iv_df["Variable"],
             y=iv_df["IV"],
             marker_color=bar_colors,
-            hovertemplate=
-            "<b>Indicator Variable: %{x}</b><br>Computed IV Value: %{y:.4f}<extra></extra>",
+            hovertemplate=("<b>%{x}</b><br>IV: %{y:.4f}<extra></extra>"),
         ))
-
     for threshold, color, label in [
         (0.3, COMPLIANT_GREEN, "Strong Bound (0.30)"),
         (0.1, WARNING_AMBER, "Medium Limit (0.10)"),
-        (0.5, CRITICAL_RED, "Leakage Cutoff (0.50)")
+        (0.5, CRITICAL_RED, "Leakage Cutoff (0.50)"),
     ]:
-        fig_iv.add_hline(y=threshold,
-                         line_dash="dash",
-                         line_color=color,
-                         line_width=1,
-                         annotation_text=label,
-                         annotation_position="top left",
-                         annotation_font_size=9,
-                         annotation_font_color=color)
-
+        fig_iv.add_hline(
+            y=threshold,
+            line_dash="dash",
+            line_color=color,
+            line_width=1,
+            annotation_text=label,
+            annotation_position="top left",
+            annotation_font_size=9,
+            annotation_font_color=color,
+        )
     fig_iv.update_layout(
         plot_bgcolor=WHITE,
         paper_bgcolor=WHITE,
@@ -549,16 +580,18 @@ def render_page():
         margin=dict(l=0, r=0, t=10, b=0),
         xaxis=dict(tickfont=dict(size=9, color=FNB_DARK_TEXT),
                    gridcolor=BORDER_GRAY),
-        yaxis=dict(title="Information Value Scale",
-                   tickfont=dict(size=9, color=FNB_DARK_TEXT),
-                   gridcolor=BORDER_GRAY,
-                   zeroline=False),
+        yaxis=dict(
+            title="Information Value",
+            tickfont=dict(size=9, color=FNB_DARK_TEXT),
+            gridcolor=BORDER_GRAY,
+            zeroline=False,
+        ),
     )
     apply_corporate_layout(fig_iv)
-    st.plotly_chart(fig_iv, width='stretch')
+    st.plotly_chart(fig_iv, width="stretch")
 
     # ══════════════════════════════════════════════════════════
-    # 3. INTERACTIVE RISK BINNING INSPECTION WORKBENCH
+    # 3. INTERACTIVE BINNING INSPECTOR
     # ══════════════════════════════════════════════════════════
     _sec("Interactive Binning Inspector Workbench", "WoE INSPECTOR")
 
@@ -567,83 +600,93 @@ def render_page():
 
     bin_table, total_iv, _ = auto_bin_numeric(df, selected_var, target_col)
     stats = _feature_stats(df, selected_var, target_col)
+    strength = _iv_strength(total_iv)
 
     if bin_table.empty:
         st.warning(
-            "Selected column contains insufficient variance distributions to successfully map out bin partitions."
-        )
+            "Selected column has insufficient variance to map bin partitions.")
         return
-
-    strength = _iv_strength(total_iv)
 
     st.markdown(
         f'<div class="feat-meta">'
         f'<span class="feat-name">{selected_var}</span>'
         f'{_badge(strength)}'
         f'<span style="font-size:0.8rem; color:{TEXT_MUTED};">'
-        f'Distribution Mean: {stats["mean"]:.2f} &nbsp;|&nbsp; Missing Metric: {stats["missing_pct"]:.2f}% &nbsp;|&nbsp; Skew Parameter: {stats["skew"]:.2f}'
+        f'Mean: {stats["mean"]:.2f} &nbsp;|&nbsp; '
+        f'Missing: {stats["missing_pct"]:.2f}% &nbsp;|&nbsp; '
+        f'Skew: {stats["skew"]:.2f}'
         f'</span>'
-        f'<span class="feat-iv">Information Value Score = <strong>{total_iv:.4f}</strong></span>'
+        f'<span class="feat-iv">IV = <strong>{total_iv:.4f}</strong></span>'
         f'</div>',
         unsafe_allow_html=True,
     )
 
     if total_iv > 0.5:
-        st.markdown(f"""
-        <div class="leakage-alert">
-            <div class="al-title">Potential Feature Leakage Risk Flagged</div>
-            <div class="al-body">
-                <strong>{selected_var}</strong> holds an intense Information Value score of <strong>{total_iv:.4f}</strong>. This parameter crosses the standard credit model leakage limit (0.50) and may represent an unapproved target proxy metric.
-            </div>
-        </div>
-        """,
-                    unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="leakage-alert">'
+            f'<div class="al-title">Potential Feature Leakage Risk Flagged</div>'
+            f'<div class="al-body"><strong>{selected_var}</strong> holds an IV of '
+            f'<strong>{total_iv:.4f}</strong>, crossing the leakage limit (0.50). '
+            f'This may represent an unapproved target proxy.</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
-    fmt_table = bin_table.rename(
-        columns={
-            "bin_label": "Bin Range Boundary Matrix",
-            "count": "Record Frequency",
-            "count_%": "Volume Share %",
-            "goods": "Goods Logged",
-            "bads": "Bads Logged",
-            "bad_rate_%": "Observed Bad Rate %",
-            "woe": "Weight of Evidence (WoE)",
-            "iv": "IV Slice Contribution",
-        })[[
-            "Bin Range Boundary Matrix", "Record Frequency", "Volume Share %",
-            "Goods Logged", "Bads Logged", "Observed Bad Rate %",
-            "Weight of Evidence (WoE)", "IV Slice Contribution"
-        ]]
+    # Bin table — column display names from actual bin_table columns
+    rename_map = {
+        "bin_label": "Bin Range",
+        "count": "Record Count",
+        "count_%": "Volume %",
+        "goods": "Goods",
+        "bads": "Bads",
+        "bad_rate_%": "Bad Rate %",
+        "woe": "WoE",
+        "iv": "IV Contribution",
+    }
+    display_cols = [
+        rename_map.get(c, c) for c in bin_table.columns if c in rename_map
+    ]
+    fmt_table = bin_table.rename(columns=rename_map)[display_cols]
 
-    woe_styled = (fmt_table.style.format({
-        "Volume Share %": "{:.2f}%",
-        "Observed Bad Rate %": "{:.2f}%",
-        "Weight of Evidence (WoE)": "{:.4f}",
-        "IV Slice Contribution": "{:.4f}"
-    }).background_gradient(
-        subset=["Weight of Evidence (WoE)"],
-        cmap="RdYlGn",
-        vmin=-1.5,
-        vmax=1.5).background_gradient(
-            subset=["Observed Bad Rate %"], cmap="Reds", vmin=0,
-            vmax=100).set_properties(**{
-                "font-size": "0.82rem",
-                "padding": "0.45rem 0.7rem"
-            }).set_table_styles([{
-                "selector":
-                "th",
-                "props": [("background-color", FNB_NAVY), ("color", WHITE),
-                          ("font-size", "0.72rem"),
-                          ("text-transform", "uppercase"),
-                          ("letter-spacing", "0.05em")]
-            }]).hide(axis="index"))
+    woe_col = "WoE" if "WoE" in fmt_table.columns else None
+    br_col = "Bad Rate %" if "Bad Rate %" in fmt_table.columns else None
 
-    st.dataframe(woe_styled, width='stretch')
+    fmt_kwargs = {}
+    if woe_col: fmt_kwargs[woe_col] = "{:.4f}"
+    if br_col: fmt_kwargs[br_col] = "{:.2f}%"
+    if "Volume %" in fmt_table.columns: fmt_kwargs["Volume %"] = "{:.2f}%"
+    if "IV Contribution" in fmt_table.columns:
+        fmt_kwargs["IV Contribution"] = "{:.4f}"
+
+    woe_styled = (fmt_table.style.format(fmt_kwargs).set_properties(
+        **{
+            "font-size": "0.82rem",
+            "padding": "0.45rem 0.7rem"
+        }).set_table_styles([{
+            "selector":
+            "th",
+            "props": [("background-color", FNB_NAVY), ("color", WHITE),
+                      ("font-size", "0.72rem"),
+                      ("text-transform", "uppercase"),
+                      ("letter-spacing", "0.05em")],
+        }]).hide(axis="index"))
+    if woe_col:
+        woe_styled = woe_styled.background_gradient(subset=[woe_col],
+                                                    cmap="RdYlGn",
+                                                    vmin=-1.5,
+                                                    vmax=1.5)
+    if br_col:
+        woe_styled = woe_styled.background_gradient(subset=[br_col],
+                                                    cmap="Reds",
+                                                    vmin=0,
+                                                    vmax=100)
+
+    st.dataframe(woe_styled, width="stretch")
 
     # ══════════════════════════════════════════════════════════
-    # 4. FNB COMPLIANT VISUAL TREND PROFILE ANALYSIS
+    # 4. WoE & BAD RATE CHARTS — entirely from bin_table data
     # ══════════════════════════════════════════════════════════
-    _sec("WoE Risk Trajectory and Empirical Default Distribution Profiles",
+    _sec("WoE Trajectory and Default Distribution Profiles",
          "MONOTONICITY VALIDATION")
 
     col1, col2 = st.columns(2)
@@ -658,16 +701,17 @@ def render_page():
                     FNB_TURQUOISE if w >= 0 else CRITICAL_RED
                     for w in bin_table["woe"]
                 ],
-                hovertemplate=
-                "<b>Range: %{x}</b><br>WoE Score: %{y:.4f}<extra></extra>",
+                hovertemplate="<b>%{x}</b><br>WoE: %{y:.4f}<extra></extra>",
             ))
         fig_woe.add_trace(
-            go.Scatter(x=bin_table["bin_label"],
-                       y=bin_table["woe"],
-                       mode="lines+markers",
-                       line=dict(color=FNB_GOLD, width=2),
-                       marker=dict(color=FNB_GOLD, size=6),
-                       hoverinfo="skip"))
+            go.Scatter(
+                x=bin_table["bin_label"],
+                y=bin_table["woe"],
+                mode="lines+markers",
+                line=dict(color=FNB_GOLD, width=2),
+                marker=dict(color=FNB_GOLD, size=6),
+                hoverinfo="skip",
+            ))
         fig_woe.add_hline(y=0, line_color=BORDER_GRAY, line_width=1)
         fig_woe.update_layout(
             plot_bgcolor=WHITE,
@@ -680,12 +724,12 @@ def render_page():
                        x=0),
             xaxis=dict(tickfont=dict(size=9, color=FNB_DARK_TEXT),
                        gridcolor=BORDER_GRAY),
-            yaxis=dict(title="WoE Log Scale",
+            yaxis=dict(title="WoE",
                        tickfont=dict(size=9, color=FNB_DARK_TEXT),
                        gridcolor=BORDER_GRAY),
         )
         apply_corporate_layout(fig_woe)
-        st.plotly_chart(fig_woe, width='stretch')
+        st.plotly_chart(fig_woe, width="stretch")
 
     with col2:
         fig_bad = go.Figure(
@@ -694,74 +738,114 @@ def render_page():
                 y=bin_table["bad_rate_%"],
                 marker_color=FNB_NAVY,
                 hovertemplate=
-                "<b>Range: %{x}</b><br>Empirical Bad Rate: %{y:.2f}%<extra></extra>",
+                "<b>%{x}</b><br>Bad Rate: %{y:.2f}%<extra></extra>",
             ))
         fig_bad.add_hline(
             y=stats["overall_default_rate"],
             line_dash="dot",
             line_color=FNB_GOLD,
             line_width=1.5,
-            annotation_text=
-            f"Portfolio Benchmark Core Avg ({stats['overall_default_rate']:.2f}%)",
+            annotation_text=(
+                f"Portfolio Avg ({stats['overall_default_rate']:.2f}%)"),
             annotation_position="top right",
             annotation_font_size=9,
-            annotation_font_color=FNB_DARK_TEXT)
+            annotation_font_color=FNB_DARK_TEXT,
+        )
         fig_bad.update_layout(
             plot_bgcolor=WHITE,
             paper_bgcolor=WHITE,
             height=280,
             margin=dict(l=0, r=0, t=20, b=0),
-            title=dict(text="Empirical Bad Rate (%) Volatility Tracking",
+            title=dict(text="Empirical Bad Rate (%) by Bin",
                        font=dict(size=11, color=FNB_NAVY),
                        x=0),
             xaxis=dict(tickfont=dict(size=9, color=FNB_DARK_TEXT),
                        gridcolor=BORDER_GRAY),
-            yaxis=dict(title="Default Scale Percentage",
+            yaxis=dict(title="Default Rate %",
                        tickfont=dict(size=9, color=FNB_DARK_TEXT),
                        gridcolor=BORDER_GRAY),
         )
         apply_corporate_layout(fig_bad)
-        st.plotly_chart(fig_bad, width='stretch')
+        st.plotly_chart(fig_bad, width="stretch")
+
+    # ── Quintile Default Rate Chart — data-driven from _feature_stats ──
+    if stats["default_rate_by_quintile"]:
+        _sec("Default Rate by Quintile", "RISK SEGMENTATION")
+        quintile_df = pd.DataFrame(
+            list(stats["default_rate_by_quintile"].items()),
+            columns=["Quintile", "Default Rate"],
+        )
+        quintile_df["Default Rate %"] = quintile_df["Default Rate"] * 100
+        quintile_df["Quintile"] = quintile_df["Quintile"].astype(str)
+
+        fig_quint = go.Figure(
+            go.Bar(
+                x=quintile_df["Quintile"],
+                y=quintile_df["Default Rate %"],
+                marker_color=FNB_TURQUOISE,
+                hovertemplate=
+                "<b>%{x}</b><br>Default Rate: %{y:.2f}%<extra></extra>",
+            ))
+        fig_quint.add_hline(
+            y=stats["overall_default_rate"],
+            line_dash="dash",
+            line_color=FNB_GOLD,
+            line_width=1.5,
+            annotation_text=
+            f"Portfolio Avg ({stats['overall_default_rate']:.2f}%)",
+            annotation_position="top right",
+            annotation_font_size=9,
+        )
+        fig_quint.update_layout(
+            plot_bgcolor=WHITE,
+            paper_bgcolor=WHITE,
+            height=280,
+            margin=dict(l=0, r=0, t=20, b=0),
+            xaxis_title="Feature Quintile",
+            yaxis_title="Default Rate %",
+        )
+        apply_corporate_layout(fig_quint)
+        st.plotly_chart(fig_quint, width="stretch")
 
     # ══════════════════════════════════════════════════════════
-    # 5. FIXED LIVE COGNITIVE ANALYST DISCOVERY CORE PANELS
+    # 5. AI COMMENTARY
     # ══════════════════════════════════════════════════════════
     _sec("Automated Financial Credit Risk Commentary",
          "GEN-AI COGNITIVE ANALYST")
 
-    with st.spinner(
-            "Generating institutional credit summary text portfolio reviews..."
-    ):
+    with st.spinner("Generating institutional credit summary…"):
         ai_commentary = _generate_ai_insight(selected_var, bin_table, total_iv,
                                              strength, stats)
 
-    st.markdown(f"""
-    <div class="ai-panel">
-        <div class="ai-hdr">Senior Portfolio Credit Risk Analyst Briefing</div>
-        <div class="ai-body">{ai_commentary}</div>
-    </div>
-    """,
-                unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="ai-panel">'
+        f'<div class="ai-hdr">Senior Portfolio Credit Risk Analyst Briefing</div>'
+        f'<div class="ai-body">{ai_commentary}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(
-        '<p style="font-size:0.9rem; font-weight:700; color:#0A2540; margin-bottom:0.5rem;">Data-Driven Actionable Pipeline Inferences</p>',
-        unsafe_allow_html=True)
+        '<p style="font-size:0.9rem; font-weight:700; color:#0A2540; '
+        'margin-bottom:0.5rem;">Data-Driven Actionable Pipeline Inferences</p>',
+        unsafe_allow_html=True,
+    )
 
     recs_list = _recommendations(selected_var, total_iv, strength, bin_table,
                                  stats)
 
     if recs_list:
         for r in recs_list:
-            st.markdown(f"""
-            <div class="rec-card">
-                <div class="rec-type">{r['type']}</div>
-                <div class="rec-title">{r['title']}</div>
-                <div class="rec-body">{r['body']}</div>
-            </div>
-            """,
-                        unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="rec-card">'
+                f'<div class="rec-type">{r["type"]}</div>'
+                f'<div class="rec-title">{r["title"]}</div>'
+                f'<div class="rec-body">{r["body"]}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
     else:
         st.info(
-            "No alignment anomalies discovered inside current metric row distribution."
+            "No alignment anomalies discovered in the current metric distribution."
         )

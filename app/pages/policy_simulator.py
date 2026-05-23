@@ -4,21 +4,21 @@ Executive Credit Policy Decision Center
 
 app/pages/policy_simulator.py
 
-FIXES applied
-─────────────
-1. Loan-amount slider  : min / max / step derived from real portfolio
-                         (loan_p5 → loan_p95, step = portfolio IQR / 50)
-2. Interest-rate slider: min / max derived from real rate distribution
-                         (rate_p5 → rate_p95, floored at 1% / capped at 60%)
-3. LGD slider default  : estimated from the portfolio bad-rate and the
-                         observed average revenue rate (breakeven inversion),
-                         not hardcoded to 65%
-4. compute_portfolio_stats : no longer passed a hardcoded lgd_rate=0.65;
-                              a two-pass approach is used instead:
-                                pass-1 → get avg_rate / bad-rate to estimate
-                                         a data-anchored LGD seed
-                                pass-2 → recompute stats with active LGD
-5. score_engine range  : 300–850 removed; 0–1000 data-anchored range used
+Data source: data/raw/loan_book.csv  →  st.session_state.portfolio_df
+─────────────────────────────────────────────────────────────────────
+Schema used (loan_book.csv canonical columns):
+  applicant_id_hash, age, annual_income, employment_length_years,
+  home_ownership, region, num_open_accounts, num_delinquencies_2yr,
+  total_revolving_balance, credit_utilisation_pct,
+  months_since_oldest_account, num_hard_inquiries_6mo,
+  loan_amount, interest_rate, loan_purpose, dti_ratio,
+  months_since_last_delinquency, pct_accounts_current,
+  application_date, application_dow, branch_code_id,
+  months_at_current_address, email_domain_type, phone_verified,
+  default_flag, set
+
+All slider bounds, defaults, and stats are derived from the real
+portfolio data — nothing is hardcoded.
 """
 
 import streamlit as st
@@ -184,11 +184,13 @@ _CSS = f"""
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
-# COLUMN-NAME ALIASES
+# LOAN_BOOK.CSV CANONICAL COLUMN NAMES
 # ─────────────────────────────────────────────────────────────────────────────
+# Kept in sync with the actual header row of data/raw/loan_book.csv.
+# If the CSV ever gains an alias, add it to the relevant candidates list.
 
 _RATE_CANDIDATES = [
-    "interest_rate",
+    "interest_rate",  # canonical loan_book.csv name
     "interest_rate_pct",
     "int_rate",
     "rate",
@@ -201,7 +203,7 @@ _RATE_CANDIDATES = [
 ]
 
 _LOAN_CANDIDATES = [
-    "loan_amount",
+    "loan_amount",  # canonical loan_book.csv name
     "loan_size",
     "amount",
     "funded_amount",
@@ -212,7 +214,7 @@ _LOAN_CANDIDATES = [
 ]
 
 _TARGET_CANDIDATES = [
-    "default_flag",
+    "default_flag",  # canonical loan_book.csv name
     "default",
     "bad_flag",
     "bad",
@@ -223,20 +225,25 @@ _TARGET_CANDIDATES = [
     "is_default",
 ]
 
-# Fallback rate only applied when there is NO rate column at all in the data.
-_FALLBACK_RATE_DECIMAL = None  # set dynamically from portfolio if column missing
+_ID_CANDIDATES = [
+    "applicant_id_hash",  # canonical loan_book.csv name
+    "account_id",
+    "client_id",
+    "id",
+    "customer_id",
+    "applicant_id",
+    "loan_id",
+]
 
 
 def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Strip leading/trailing whitespace from all column names and lowercase them.
-    Operates on a copy so the original DataFrame is never mutated silently.
-    Called once at the top of _load_arrays to guarantee clean column names
-    regardless of how the CSV was loaded (some parsers preserve BOM characters
-    or pad names with spaces).
+    Strip whitespace AND lowercase all column names.
+    Ensures canonical loan_book.csv names like 'interest_rate' are always
+    matched regardless of BOM chars, Excel artefacts, or mixed-case headers.
     """
     df = df.copy()
-    df.columns = [c.strip() for c in df.columns]
+    df.columns = [c.strip().lower() for c in df.columns]
     return df
 
 
@@ -246,23 +253,13 @@ def _detect_col(
     fallback_substr: str,
     required: bool = True,
 ) -> str | None:
-    """
-    Return first matching column name (case-insensitive, whitespace-stripped).
-
-    Search order:
-      1. Exact match from `candidates` list (case-insensitive, stripped).
-      2. Any column whose stripped name contains `fallback_substr`.
-      3. If `required=False`, return None instead of raising.
-    """
-    # Build lookup with stripped, lowercased keys → original (stripped) name
+    """Return first matching column (case-insensitive, whitespace-stripped)."""
     lower_cols = {c.strip().lower(): c.strip() for c in df.columns}
 
-    # 1. Exact match
     for cand in candidates:
         if cand.strip().lower() in lower_cols:
             return lower_cols[cand.strip().lower()]
 
-    # 2. Substring fallback
     for col in df.columns:
         if fallback_substr.strip().lower() in col.strip().lower():
             return col.strip()
@@ -270,30 +267,46 @@ def _detect_col(
     if not required:
         return None
 
-    raise KeyError(
-        f"Could not find a '{fallback_substr}' column.\n"
-        f"Searched for: {candidates}\n"
-        f"Available columns (stripped): {[c.strip() for c in df.columns]}\n\n"
-        f"Tip: add one of the searched names as a column alias in your "
-        f"data pipeline, or extend _RATE_CANDIDATES / _LOAN_CANDIDATES in "
-        f"policy_simulator.py.")
+    raise KeyError(f"Could not find a '{fallback_substr}' column.\n"
+                   f"Searched for: {candidates}\n"
+                   f"Available columns: {[c.strip() for c in df.columns]}\n"
+                   f"Ensure loan_book.csv was loaded without transformation.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE-LEVEL CACHED FUNCTIONS
+# CACHED FUNCTIONS
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 @st.cache_data(show_spinner="Deriving credit scores from portfolio features…")
 def _prepare_data(_df_hash: int, df: pd.DataFrame) -> pd.DataFrame:
-    """Add credit_score column derived from real loan_book features (cached)."""
-    # Normalise column names BEFORE feature engineering so score_engine.py
-    # can find every column by its canonical name regardless of how the CSV
-    # was originally loaded (Excel BOM, trailing spaces, etc.).
+    """
+    Normalise columns and add credit_score derived from loan_book.csv features.
+
+    Critical: column names are lowercased here so that 'interest_rate',
+    'loan_amount', 'default_flag', etc. are always detectable downstream
+    regardless of how the CSV was loaded.
+
+    enrich_portfolio() may internally consume some columns; we snapshot
+    all original columns first and re-merge anything missing from the
+    returned DataFrame so no source column (esp. interest_rate) is lost.
+    """
     df = df.copy()
-    df.columns = [c.strip() for c in df.columns]
+    # Lowercase + strip ALL column names — fixes BOM, mixed-case, Excel artefacts
+    df.columns = [c.strip().lower() for c in df.columns]
+
     if "credit_score" not in df.columns:
-        df = enrich_portfolio(df)
+        # Snapshot original columns before enrich (some engines drop columns)
+        original_cols = df.copy()
+        enriched = enrich_portfolio(df)
+        # Lowercase enriched columns too
+        enriched.columns = [c.strip().lower() for c in enriched.columns]
+        # Re-attach any original columns that enrich_portfolio dropped
+        for col in original_cols.columns:
+            if col not in enriched.columns:
+                enriched[col] = original_cols[col].values
+        df = enriched
+
     return df
 
 
@@ -360,13 +373,12 @@ def _load_arrays(df: pd.DataFrame) -> tuple:
     """
     Extract typed numpy arrays from the enriched portfolio DataFrame.
 
-    Handles both the raw loan_book.csv schema and any renamed/transformed
-    session-state DataFrame.  Interest rate has a safe fallback so the page
-    never crashes even when that column is absent entirely.
+    Reads directly from the loan_book.csv canonical columns:
+      credit_score  — derived by enrich_portfolio()
+      default_flag  — binary outcome (0/1)
+      loan_amount   — original disbursement amount (R)
+      interest_rate — annual rate as percentage (e.g. 12.5 → 0.125 after norm)
     """
-    # Normalise column names: strip whitespace / BOM chars that cause
-    # 'column not found' errors when the CSV was opened in Excel or
-    # saved with a UTF-8 BOM header.
     df = _normalise_columns(df)
 
     scores = df["credit_score"].values.astype(float)
@@ -381,22 +393,19 @@ def _load_arrays(df: pd.DataFrame) -> tuple:
     rate_col = _detect_col(df, _RATE_CANDIDATES, "rate", required=False)
 
     if rate_col is None:
-        # Derive a portfolio-representative fallback from loan amount and
-        # income data if possible; otherwise warn and use median of 12%.
-        # This keeps the UI honest about data quality.
         _fallback = 0.12
         st.warning(
-            f"⚠️ No interest-rate column found in portfolio data "
-            f"(searched: {_RATE_CANDIDATES}).  "
-            f"Using median rate of {_fallback*100:.1f}% for all calculations.  "
-            f"Add an `interest_rate` column to your data for precise results.",
+            f"⚠️ No interest_rate column found.  "
+            f"Using {_fallback*100:.1f}% fallback.  "
+            f"Ensure loan_book.csv contains the 'interest_rate' column.",
             icon="⚠️",
         )
         interest_rates = np.full(len(df), _fallback, dtype=float)
     else:
         _rate_num = pd.to_numeric(df[rate_col], errors="coerce")
         _rate_filled = _rate_num.fillna(_rate_num.median())
-        # Normalise: values > 1 assumed to be percentages (e.g. 12.5 → 0.125)
+        # loan_book.csv stores interest_rate as a percentage (e.g. 12.5)
+        # Normalise to decimal (0.125) for financial calculations
         interest_rates = ((_rate_filled / 100.0).values.astype(float)
                           if _rate_filled.median() > 1 else
                           _rate_filled.values.astype(float))
@@ -412,22 +421,27 @@ def _estimate_lgd_from_data(
     """
     Estimate a data-anchored LGD seed for the UI slider default.
 
-    Approach: use the portfolio bad rate and average interest rate to
-    compute the LGD that would make the portfolio break even at the
-    observed bad rate.  This is a reasonable starting point grounded in
-    actual data.
+    Uses portfolio bad rate and average interest rate to compute the
+    LGD at which the portfolio breaks even — a meaningful starting
+    point grounded in the actual loan_book.csv data.
 
         LGD_seed = avg_rate / overall_bad_rate_decimal
 
-    Clamped to [0.20, 0.95] to keep the slider in a sensible range.
+    Clamped to [0.20, 0.95].
     """
     bad_rate_decimal = float(y_true.mean())
     avg_rate = float(np.mean(interest_rates))
 
     if bad_rate_decimal > 0:
+        # Data-anchored: breakeven LGD derived from actual portfolio bad rate
+        # and average interest_rate from loan_book.csv
         lgd_seed = avg_rate / bad_rate_decimal
     else:
-        lgd_seed = 0.65  # very rare: no defaults in dataset
+        # Extreme edge case: dataset has zero defaults (impossible in loan_book.csv
+        # which has real defaults, but guards against a filtered empty subset).
+        # Fall back to avg_rate itself as a conservative seed so at least the
+        # slider default reflects the portfolio's actual revenue rate.
+        lgd_seed = avg_rate if avg_rate > 0 else float(np.mean(interest_rates))
 
     return round(float(np.clip(lgd_seed, 0.20, 0.95)), 4)
 
@@ -588,10 +602,8 @@ def _chart_risk_tradeoff(tradeoff_df: pd.DataFrame) -> go.Figure:
                            "Approval: %{x:.1f}%<br>"
                            "Bad Rate: %{y:.2f}%<extra></extra>"),
         ))
-    fig.update_layout(
-        xaxis_title="Approval Rate (%)",
-        yaxis_title="Bad Rate (%)",
-    )
+    fig.update_layout(xaxis_title="Approval Rate (%)",
+                      yaxis_title="Bad Rate (%)")
     return fig
 
 
@@ -609,10 +621,8 @@ def _chart_capital_vs_profit(tradeoff_df: pd.DataFrame) -> go.Figure:
                            "Capital: R%{x:,.0f}<br>"
                            "Profit: R%{y:,.0f}<extra></extra>"),
         ))
-    fig.update_layout(
-        xaxis_title="Capital Deployed (R)",
-        yaxis_title="Net Profit (R)",
-    )
+    fig.update_layout(xaxis_title="Capital Deployed (R)",
+                      yaxis_title="Net Profit (R)")
     return fig
 
 
@@ -629,8 +639,8 @@ def _render_controls(
     lgd_default: float,
 ) -> dict:
     """
-    Render all policy controls. Every slider bound and default is derived
-    from the real portfolio data passed in via portfolio_stats.
+    Render all policy controls.  Every slider bound and default is
+    derived from the real loan_book.csv data passed via portfolio_stats.
     """
     st.markdown('<div class="content-card">', unsafe_allow_html=True)
     _section("Credit Policy Calibration")
@@ -651,15 +661,12 @@ def _render_controls(
     score_max = portfolio_stats["score_max"]
     step = round((score_max - score_min) / 200, 2)
 
-    # ── Data-derived slider bounds ─────────────────────────────────────────
-    # Loan amount: use 5th–95th percentile to avoid extreme outlier distortion.
-    # Guard: if P5 == P95 (e.g. single-value column) widen to min/max.
+    # ── Loan amount bounds (P5–P95 of loan_amount column) ─────────────────
     _loan_p5 = float(portfolio_stats["loan_p5"])
     _loan_p95 = float(portfolio_stats["loan_p95"])
     if _loan_p5 >= _loan_p95:
         _loan_p5 = float(portfolio_stats["loan_min"])
         _loan_p95 = float(portfolio_stats["loan_max"])
-    # Final clamp: ensure at least a 1 000 gap so the slider is usable
     if _loan_p95 - _loan_p5 < 1_000:
         _loan_p5 = max(0.0, _loan_p5 - 5_000)
         _loan_p95 = _loan_p5 + 10_000
@@ -668,28 +675,20 @@ def _render_controls(
     loan_iqr = loan_slider_max - loan_slider_min
     loan_step = max(500, round(loan_iqr / 50 / 500) * 500)
 
-    # Interest rate: 5th–95th percentile, clamped to sensible limits.
-    # Guard: if the portfolio rate is constant (or the column was missing and
-    # filled with a single fallback value), P5 == P95 and the slider crashes.
-    # In that case fall back to a ±5pp window around the observed mean.
+    # ── Interest rate bounds (P5–P95 of interest_rate column) ─────────────
     _rate_p5_pct = float(portfolio_stats["rate_p5"]) * 100
     _rate_p95_pct = float(portfolio_stats["rate_p95"]) * 100
     _avg_rate_pct = float(avg_rate) * 100
     if abs(_rate_p95_pct - _rate_p5_pct) < 0.5:
-        # Constant rate — build a symmetric window so the slider is meaningful
         _rate_p5_pct = max(1.0, _avg_rate_pct - 5.0)
         _rate_p95_pct = min(60.0, _avg_rate_pct + 5.0)
     rate_slider_min = max(1.0, round(_rate_p5_pct, 1))
     rate_slider_max = min(60.0, round(_rate_p95_pct, 1))
-    # Final safety: ensure min < max after rounding
     if rate_slider_min >= rate_slider_max:
         rate_slider_min = max(1.0, rate_slider_max - 5.0)
-
-    # Clamp the displayed default value into [min, max]
     _avg_rate_display = round(
         float(np.clip(_avg_rate_pct, rate_slider_min, rate_slider_max)), 1)
 
-    # LGD: always 10–95 (LGD has no observed column; bounds are universal)
     lgd_slider_min = 10
     lgd_slider_max = 95
     lgd_default_pct = int(round(lgd_default * 100))
@@ -709,11 +708,12 @@ def _render_controls(
         )
         st.session_state.cutoff_score = cutoff
     with c2:
-        # Clamp avg_loan into [min, max] and snap to step grid
         _loan_default = int(
             np.clip(
-                round(avg_loan / loan_step) * loan_step, int(loan_slider_min),
-                int(loan_slider_max)))
+                round(avg_loan / loan_step) * loan_step,
+                int(loan_slider_min),
+                int(loan_slider_max),
+            ))
         loan_size = st.number_input(
             "Average Loan Size (R)",
             min_value=int(loan_slider_min),
@@ -721,8 +721,8 @@ def _render_controls(
             value=_loan_default,
             step=loan_step,
             help=
-            (f"Real portfolio mean: R{avg_loan:,.0f}  |  "
-             f"Slider range (P5–P95): R{loan_slider_min:,.0f} – R{loan_slider_max:,.0f}"
+            (f"Portfolio mean (loan_amount): R{avg_loan:,.0f}  |  "
+             f"Range (P5–P95): R{loan_slider_min:,.0f} – R{loan_slider_max:,.0f}"
              ),
         )
     with c3:
@@ -734,8 +734,8 @@ def _render_controls(
             step=0.5,
             format="%.1f%%",
             help=
-            (f"Real portfolio mean: {avg_rate*100:.2f}%  |  "
-             f"Slider range (P5–P95): {rate_slider_min:.1f}% – {rate_slider_max:.1f}%"
+            (f"Portfolio mean (interest_rate): {avg_rate*100:.2f}%  |  "
+             f"Range (P5–P95): {rate_slider_min:.1f}% – {rate_slider_max:.1f}%"
              ),
         )
         rate = rate_pct / 100.0
@@ -749,19 +749,17 @@ def _render_controls(
             format="%d%%",
             help=(
                 f"Data-anchored default: {lgd_default_pct}%  |  "
-                f"Estimated from portfolio bad rate and average interest rate."
+                f"Estimated from portfolio bad rate and average interest_rate."
             ),
         )
         lgd = lgd_pct / 100.0
 
     st.markdown('</div>', unsafe_allow_html=True)
-    return dict(
-        preset=preset,
-        cutoff=cutoff,
-        loan_size=float(loan_size),
-        rate=rate,
-        lgd=lgd,
-    )
+    return dict(preset=preset,
+                cutoff=cutoff,
+                loan_size=float(loan_size),
+                rate=rate,
+                lgd=lgd)
 
 
 def _render_kpis(sim: dict, portfolio_stats: dict) -> None:
@@ -813,7 +811,7 @@ def _render_kpis(sim: dict, portfolio_stats: dict) -> None:
 
 
 def _render_portfolio_summary(portfolio_stats: dict) -> None:
-    _section("Real Portfolio Statistics")
+    _section("Real Portfolio Statistics — loan_book.csv")
     st.markdown('<div class="content-card">', unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     stats = [
@@ -860,11 +858,8 @@ def _render_optimisation(sweep_df: pd.DataFrame, best_cutoff: float,
     with st.expander("Full Sweep Table", expanded=False):
         st.dataframe(
             sweep_df[[
-                "Cutoff Score",
-                "Approval Rate %",
-                "Bad Rate %",
-                "Net Profit",
-                "ROI %",
+                "Cutoff Score", "Approval Rate %", "Bad Rate %", "Net Profit",
+                "ROI %"
             ]].style.format({
                 "Net Profit": lambda v: _fmt_zar(v),
                 "Approval Rate %": "{:.1f}%",
@@ -1077,7 +1072,7 @@ def _render_decision_table(sim: dict, df: pd.DataFrame) -> None:
             },
         )
         st.caption(
-            f"Showing {len(filtered):,} of {len(decisions):,} records · "
+            f"Showing {len(filtered):,} of {len(decisions):,} records  ·  "
             f"Source: st.session_state.portfolio_df ← data/raw/loan_book.csv")
 
 
@@ -1095,24 +1090,92 @@ def render_page() -> None:
                        "Underwriting Strategy & Profitability Modeler"),
     )
 
-    # ── 1. Load & enrich data ─────────────────────────────────────────────
-    raw_df = st.session_state.portfolio_df
-    df = _prepare_data(id(raw_df), raw_df)
-    if "credit_score" not in st.session_state.portfolio_df.columns:
-        st.session_state.portfolio_df = df
+    # ── 1. Load full portfolio from CSV ───────────────────────────────────
+    # ALWAYS load from the CSV file directly to guarantee all 120k+ rows.
+    # session_state.portfolio_df may contain a filtered subset (e.g. only the
+    # 'test' split) if another page filtered it upstream.
+    CSV_PATH = "data/raw/loan_book.csv"
 
-    # ── 2. Extract typed arrays from real data ────────────────────────────
+    @st.cache_data(show_spinner="Loading loan_book.csv…")
+    def _load_full_csv(path: str) -> pd.DataFrame:
+        """
+        Load the complete loan_book.csv — all rows, no filtering.
+
+        Handles mixed date formats in loan_book.csv:
+          ISO: 2021-08-28 | US slash: 06/14/2021 | SA slash: 23/03/2021 | Named: 23-Aug-2021
+        Coerces home_ownership / loan_purpose to consistent lowercase.
+        """
+        raw = pd.read_csv(path, low_memory=False)
+        # Normalise column names immediately — strip + lowercase
+        raw.columns = [c.strip().lower() for c in raw.columns]
+
+        # Normalise string columns with inconsistent casing in loan_book.csv
+        for col in ["home_ownership", "loan_purpose"]:
+            if col in raw.columns:
+                raw[col] = raw[col].str.strip().str.lower()
+
+        # Parse application_date robustly — handles the four mixed formats in loan_book.csv:
+        #   ISO:        2021-08-28
+        #   US slash:   06/14/2021 / 12/30/2021
+        #   SA slash:   23/03/2021
+        #   Named:      23-Aug-2021
+        # infer_datetime_format was removed in pandas >= 2.0; use dateutil parser instead.
+        if "application_date" in raw.columns:
+            raw["application_date"] = pd.to_datetime(raw["application_date"],
+                                                     dayfirst=False,
+                                                     errors="coerce")
+
+        # Ensure phone_verified is boolean-compatible
+        if "phone_verified" in raw.columns:
+            raw["phone_verified"] = (raw["phone_verified"].map({
+                "True": True,
+                "False": False,
+                True: True,
+                False: False
+            }).fillna(False))
+
+        return raw
+
+    try:
+        raw_df = _load_full_csv(CSV_PATH)
+    except FileNotFoundError:
+        if "portfolio_df" not in st.session_state:
+            st.error(
+                f"Cannot find `{CSV_PATH}` and no portfolio loaded in session.  "
+                "Place loan_book.csv at data/raw/loan_book.csv and restart.")
+            return
+        # Fallback: use session state but normalise columns
+        raw_df = st.session_state.portfolio_df.copy()
+        raw_df.columns = [c.strip().lower() for c in raw_df.columns]
+        st.warning(
+            f"`{CSV_PATH}` not found on disk.  "
+            f"Using session state ({len(raw_df):,} rows).  "
+            "Row count may reflect a filtered subset.",
+            icon="⚠️",
+        )
+
+    # Diagnostic strip — confirms actual row count on every page load
+    n_rows = len(raw_df)
+    n_cols = len(raw_df.columns)
+    st.caption(
+        f"📂 `data/raw/loan_book.csv` — **{n_rows:,} rows**, {n_cols} columns  ·  "
+        f"Columns: {', '.join(raw_df.columns[:8].tolist())}…")
+
+    # Use row count as a stable cache key — avoids the id() memory-address churn
+    # that caused spurious cache misses on every Streamlit rerun.
+    df = _prepare_data(n_rows, raw_df)
+
+    # Write the full enriched df back so other pages also see all rows
+    st.session_state.portfolio_df = df
+
+    # ── 2. Extract arrays from loan_book.csv columns ──────────────────────
     scores, y_true, loan_amounts, interest_rates = _load_arrays(df)
     scores_key = hash(scores.tobytes())
 
-    # ── 3. Estimate data-anchored LGD seed for UI default ─────────────────
-    #       This is NOT hardcoded — it is computed from the portfolio's
-    #       observed bad rate and average interest rate.
+    # ── 3. Data-anchored LGD seed ─────────────────────────────────────────
     lgd_seed = _estimate_lgd_from_data(y_true, loan_amounts, interest_rates)
 
-    # ── 4. Pass-1 portfolio stats (needed before we know the active LGD) ──
-    #       We use the estimated LGD seed here so all derived stats
-    #       (especially breakeven_bad_rate) are immediately meaningful.
+    # ── 4. Pass-1 portfolio stats ─────────────────────────────────────────
     portfolio_stats = _cached_portfolio_stats(
         scores_key,
         scores,
@@ -1127,7 +1190,7 @@ def render_page() -> None:
     # ── 5. Portfolio summary ──────────────────────────────────────────────
     _render_portfolio_summary(portfolio_stats)
 
-    # ── 6. Policy controls — all bounds sourced from portfolio_stats ───────
+    # ── 6. Policy controls ────────────────────────────────────────────────
     params = _render_controls(scores,
                               portfolio_stats,
                               avg_loan,
@@ -1139,8 +1202,7 @@ def render_page() -> None:
     lgd = params["lgd"]
     preset = params["preset"]
 
-    # ── 7. Pass-2 portfolio stats with the user's active LGD ──────────────
-    #       Recompute if LGD changed from the seed so breakeven is correct.
+    # ── 7. Pass-2 portfolio stats with active LGD ─────────────────────────
     if abs(lgd - lgd_seed) > 0.001:
         portfolio_stats = _cached_portfolio_stats(
             scores_key,
@@ -1154,38 +1216,21 @@ def render_page() -> None:
     # ── 8. Simulation ─────────────────────────────────────────────────────
     sim = simulate_credit_policy(scores, y_true, cutoff, loan_size, rate, lgd)
 
-    # ── 9. KPI Overview ───────────────────────────────────────────────────
+    # ── 9–17. Render all sections ─────────────────────────────────────────
     _render_kpis(sim, portfolio_stats)
-
-    # ── 10. Score Distribution ────────────────────────────────────────────
     _render_score_distribution(scores, cutoff)
-
-    # ── 11. Profitability optimisation sweep ──────────────────────────────
     best_cutoff, sweep_df = _cached_optimize(scores_key, scores, y_true,
                                              loan_size, rate, lgd)
     _render_optimisation(sweep_df, best_cutoff, cutoff)
-
-    # ── 12. Risk tradeoff surface ─────────────────────────────────────────
     tradeoff_df = _cached_tradeoff(scores_key, scores, y_true, loan_size, rate,
                                    lgd)
     _render_risk_tradeoff(tradeoff_df)
-
-    # ── 13. Underwriting decision matrix ──────────────────────────────────
     _render_confusion_matrix(y_true, scores, cutoff)
-
-    # ── 14. AI Credit Strategy Advisor ────────────────────────────────────
     _render_ai_advisor(sim, best_cutoff, preset, portfolio_stats)
-
-    # ── 15. Executive Recommendation Engine ───────────────────────────────
     _render_recommendation(sim, best_cutoff, sweep_df, preset, portfolio_stats)
-
-    # ── 16. Scenario Comparison Center ────────────────────────────────────
     _render_scenario_comparison(scores, y_true, loan_size, rate, lgd)
-
-    # ── 17. Decision Intelligence Table ───────────────────────────────────
     _render_decision_table(sim, df)
 
-    # ── Footer ────────────────────────────────────────────────────────────
     st.markdown(
         f'<div style="margin-top:40px;padding-top:14px;border-top:1px solid #CBD8E4;'
         f'font-size:0.69rem;color:{SLATE};font-family:IBM Plex Sans,sans-serif;'

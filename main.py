@@ -1,4 +1,5 @@
 import streamlit as st
+import pandas as pd
 from pathlib import Path
 from streamlit_option_menu import option_menu
 
@@ -18,6 +19,7 @@ APP_DIR = BASE_DIR / "app"
 STYLES_DIR = APP_DIR / "styles"
 ASSETS_DIR = APP_DIR / "assets"
 LOGO_PATH = ASSETS_DIR / "fnb_logo.png"
+CSV_PATH = BASE_DIR / "data" / "raw" / "loan_book.csv"
 
 # ==========================================================
 # LOAD CSS FILES
@@ -169,22 +171,10 @@ div[data-testid="stInfo"] {
 /* =========================================================
    SCROLLBAR
 ========================================================= */
-::-webkit-scrollbar {
-    width: 10px;
-}
-
-::-webkit-scrollbar-track {
-    background: #F1F5F9;
-}
-
-::-webkit-scrollbar-thumb {
-    background: #CBD5E1;
-    border-radius: 10px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-    background: #94A3B8;
-}
+::-webkit-scrollbar { width: 10px; }
+::-webkit-scrollbar-track { background: #F1F5F9; }
+::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
 
 /* =========================================================
    NAVIGATION MENU FIX (BLACK TEXT ONLY)
@@ -193,27 +183,21 @@ div[data-testid="stInfo"] {
     color: #111111 !important;
     background-color: rgba(255, 255, 255, 0.88) !important;
 }
-
-.nav-link svg,
-.nav-link i {
+.nav-link svg, .nav-link i {
     fill: #111111 !important;
     color: #111111 !important;
 }
-
 .nav-link:hover {
     background-color: rgba(0, 0, 0, 0.06) !important;
     color: #111111 !important;
 }
-
 .nav-link-selected {
     background: linear-gradient(135deg,#F58220,#D96D12) !important;
     color: #ffffff !important;
     font-weight: 700;
     box-shadow: 0px 4px 14px rgba(245,130,32,0.35);
 }
-
-.nav-link-selected svg,
-.nav-link-selected i {
+.nav-link-selected svg, .nav-link-selected i {
     fill: #ffffff !important;
     color: #ffffff !important;
 }
@@ -231,18 +215,65 @@ from app.pages import (dashboard, client_onboarding, research, data_quality,
                        explainability)
 
 # ==========================================================
-# INITIALIZE SESSION STATE
+# INITIALIZE SESSION STATE (non-data keys only)
 # ==========================================================
 init_session_state()
 
-# Initialize empty placeholder values for EDA controls to prevent routing bugs
-eda_selected = None
-eda_compare = None
-eda_outliers = None
+
+# ==========================================================
+# LOAD FULL PORTFOLIO DATA INTO SESSION STATE
+# Runs once per session via the "portfolio_loaded" guard.
+# Every page reads from st.session_state.portfolio_df —
+# this is the single source of truth for the entire app.
+# ==========================================================
+@st.cache_data(show_spinner=False)
+def _load_portfolio(path: str) -> pd.DataFrame:
+    """Load and normalise the full loan_book.csv — cached across reruns."""
+    df = pd.read_csv(path, low_memory=False)
+    df.columns = [c.strip() for c in df.columns]
+
+    # Normalise string columns
+    for c in df.columns:
+        if pd.api.types.is_object_dtype(df[c]):
+            df[c] = df[c].astype(str).str.strip()
+
+    # Lowercase common categoricals for consistency
+    for c in ["home_ownership", "loan_purpose", "region", "email_domain_type"]:
+        if c in df.columns:
+            df[c] = df[c].str.lower()
+
+    return df
+
+
+if "portfolio_loaded" not in st.session_state:
+    if not CSV_PATH.exists():
+        st.error(f"loan_book.csv not found at: {CSV_PATH}")
+        st.stop()
+
+    with st.spinner(f"Loading portfolio data from {CSV_PATH.name}…"):
+        _df = _load_portfolio(str(CSV_PATH))
+
+    # Derive feature list — exclude metadata and target columns
+    _meta = {"applicant_id_hash", "application_date", "application_dow", "set"}
+    _target = next(
+        (c for c in ["default_flag", "default", "loan_default", "target"]
+         if c in _df.columns),
+        None,
+    )
+    _features = [c for c in _df.columns if c not in _meta and c != _target]
+
+    st.session_state.portfolio_df = _df
+    st.session_state.features = _features
+    st.session_state.target_col = _target
+    st.session_state.portfolio_loaded = True  # guard — never re-runs
 
 # ==========================================================
 # SIDEBAR
 # ==========================================================
+eda_selected = None
+eda_compare = None
+eda_outliers = None
+
 with st.sidebar:
 
     st.markdown('<div class="brand-wrapper">', unsafe_allow_html=True)
@@ -302,28 +333,28 @@ with st.sidebar:
                 "padding": "13px 15px",
                 "border-radius": "12px",
                 "color": "#111111",
-                "font-weight": "500"
+                "font-weight": "500",
             },
             "nav-link-selected": {
                 "background": "linear-gradient(135deg,#F58220,#D96D12)",
                 "color": "#ffffff",
                 "font-weight": "700",
-                "box-shadow": "0px 4px 14px rgba(245,130,32,0.35)"
+                "box-shadow": "0px 4px 14px rgba(245,130,32,0.35)",
             },
         },
     )
 
-    # Contextually parse the dynamic variables if the EDA page is running
-    if selected_page == "Interactive EDA Lab" and "portfolio_df" in st.session_state:
+    # EDA sidebar controls — built from the already-loaded session state df
+    if selected_page == "Interactive EDA Lab" and st.session_state.get(
+            "portfolio_loaded"):
         try:
-            _df = eda_lab.load_data()
-            _target = eda_lab.detect_target(_df)
-            _num, _cat = eda_lab.detect_features(_df, _target)
+            _df = st.session_state.portfolio_df
+            _tgt = st.session_state.get("target_col")
+            _num, _cat = eda_lab.detect_features(_df, _tgt)
             eda_selected, eda_compare, eda_outliers = eda_lab.render_sidebar_controls(
                 _num, _cat)
         except Exception as e:
-            st.sidebar.error(
-                f"Error initializing EDA background assets: {str(e)}")
+            st.sidebar.error(f"EDA controls error: {e}")
 
 # ==========================================================
 # PAGE ROUTING
